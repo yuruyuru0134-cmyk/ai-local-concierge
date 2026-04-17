@@ -108,12 +108,14 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 カテゴリ: ${getUsefulSubLabel(subOptionId)}
 
 【厳守ルール】
-- 位置情報がある場合は必ず searchNearby ツールを呼び出してから回答すること
-- 取得した検索結果を全件そのまま表示すること（省略・絞り込み禁止）
-- 各スポットは「- [名称](GoogleマップURL) — 種別」の形式で表示すること
-- 先頭に「○件見つかりました（半径1km以内）」と件数を表示すること
+- 位置情報がある場合は必ず最初に searchNearby ツールを呼び出すこと（必須）
+- searchNearby の結果を受け取ったら、必ず以下の形式で応答すること
+- 先頭行: 「○件見つかりました（半径1km以内）」（0件でも必ず書く）
+- 各スポットは「- [名称](GoogleマップURL) — 種別」の形式で全件表示
+- spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Google マップで検索](fallbackUrl)」と表示
+- error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl)」と表示
+- チラシ・特売情報カテゴリの場合は flyerUrl も Markdownリンクで表示
 - AIによる推察・感想・おすすめコメントは一切加えないこと
-- チラシ・特売情報カテゴリの場合は flyerUrl も Markdownリンクで表示すること
 - 位置情報がない場合は住所・地域名を聞くこと`
 
     case 'thinking':
@@ -185,13 +187,18 @@ export async function POST(req: Request) {
               tags?: Record<string, string>
             }
 
+            const fallbackUrl = `https://www.google.com/maps/search/${encodeURIComponent(getUsefulSubLabel(subOptionId))}/@${lat},${lng},15z`
             const spots: Array<{ name: string; type: string; mapUrl: string }> = []
             try {
+              const controller = new AbortController()
+              const timer = setTimeout(() => controller.abort(), 20000)
               const overpassRes = await fetch('https://overpass-api.de/api/interpreter', {
                 method: 'POST',
                 body: `data=${encodeURIComponent(query)}`,
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                signal: controller.signal,
               })
+              clearTimeout(timer)
               const overpassData = await overpassRes.json() as { elements?: OverpassElement[] }
               for (const el of overpassData.elements ?? []) {
                 const name = el.tags?.name
@@ -203,22 +210,20 @@ export async function POST(req: Request) {
                 spots.push({ name, type, mapUrl })
                 if (spots.length >= 20) break
               }
-            } catch {
-              const fallbackUrl = `https://www.google.com/maps/search/${encodeURIComponent(getUsefulSubLabel(subOptionId))}/@${lat},${lng},15z`
-              return { area, spots: [], fallbackUrl, error: 'データ取得に失敗しました。代替リンクをご利用ください。' }
+            } catch (e) {
+              console.error('[searchNearby] Overpass API error:', e)
+              return { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。' }
             }
 
             // チラシ・特売の場合はトクバイURLも追加
             if (subOptionId === 'sale') {
               return {
-                area,
-                spots,
-                total: spots.length,
+                area, spots, total: spots.length, fallbackUrl,
                 flyerUrl: `https://tokubai.co.jp/stores?lat=${lat}&lng=${lng}`,
               }
             }
 
-            return { area, spots, total: spots.length }
+            return { area, spots, total: spots.length, fallbackUrl }
           },
         },
       },
