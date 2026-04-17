@@ -111,12 +111,16 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 - 位置情報がある場合は必ず最初に searchNearby ツールを呼び出すこと（必須）
 - searchNearby の結果を受け取ったら、必ず以下の形式で応答すること
 - 先頭行: 「○件見つかりました（半径1km以内）」（0件でも必ず書く）
-- 交通・駅カテゴリ（transportMode: true）の場合は以下の形式で表示:
-  「## 最寄り駅\n- [駅名](GoogleマップURL) — 種別 ／ distanceLabel\n\n## 最寄りバス停\n- [バス停名](GoogleマップURL) — bus_stop ／ distanceLabel」
-  （駅またはバス停が見つからない場合はその項目ごと「見つかりませんでした」と表示）
-- 交通以外のカテゴリは以下の形式で全件表示:
-  「- [名称](GoogleマップURL) — 種別 ／ distanceLabel ／ おすすめ情報があれば一言」
-- おすすめ情報はOSMの tags（cuisine, opening_hours, takeaway, delivery, phone など）や施設の種別から推定して簡潔に1行で添える。情報がなければ省略してよい
+- 交通・駅カテゴリ（結果に transportMode: true が含まれる場合）の表示形式:
+  ## 最寄り駅
+  - [駅名](GoogleマップURL) — 種別 ／ distanceLabel の値（例: 約230m）
+  （駅・バス停それぞれ見つからなければ「見つかりませんでした」と表示）
+  ## 最寄りバス停
+  - [バス停名](GoogleマップURL) — bus_stop ／ distanceLabel の値
+- 交通以外のカテゴリの表示形式:
+  「- [名称](GoogleマップURL) — 種別 ／ spots[i].distanceLabel の値 ／ おすすめ情報があれば一言」
+  例: 「- [マクドナルド渋谷店](https://...) — fast_food ／ 約230m ／ 24時間営業・テイクアウト可」
+- おすすめ情報はOSMの tags（cuisine, opening_hours, takeaway, delivery など）から推定して1行で。情報がなければ省略
 - spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Google マップで検索](fallbackUrl)」と表示
 - error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl)」と表示
 - チラシ・特売情報カテゴリの場合は flyerUrl も Markdownリンクで表示
@@ -197,7 +201,8 @@ export async function POST(req: Request) {
             const queryParts = filters.map(f =>
               `node[${f}](around:${radius},${lat},${lng});way[${f}](around:${radius},${lat},${lng});`
             ).join('')
-            const query = `[out:json][timeout:25];(${queryParts});out center 50;`
+            const limit = subOptionId === 'transport' ? 50 : 30
+            const query = `[out:json][timeout:25];(${queryParts});out center ${limit};`
 
             type OverpassElement = {
               lat?: number; lon?: number
@@ -231,23 +236,23 @@ export async function POST(req: Request) {
                   if (el.tags?.[key]) usefulTags[key] = el.tags[key]
                 }
                 spots.push({ name, type, mapUrl, distanceM, distanceLabel: formatDist(distanceM), ...(Object.keys(usefulTags).length > 0 ? { tags: usefulTags } : {}) })
-                if (spots.length >= 50) break
+                if (spots.length >= (subOptionId === 'transport' ? 50 : 20)) break
               }
             } catch (e) {
               console.error('[searchNearby] Overpass API error:', e)
               return { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。' }
             }
 
-            // 交通・駅: 駅とバス停をそれぞれ最寄り1件に絞る
+            // 交通・駅: 駅とバス停をそれぞれ近い順3件に絞る
             if (subOptionId === 'transport') {
               const stations = spots
                 .filter(s => s.tags?.railway && s.tags.railway !== 'bus_stop')
                 .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
-                .slice(0, 1)
+                .slice(0, 3)
               const busStops = spots
                 .filter(s => s.type === 'bus_stop' || s.tags?.highway === 'bus_stop')
                 .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
-                .slice(0, 1)
+                .slice(0, 3)
               const transportSpots = [...stations, ...busStops]
               return { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
             }
