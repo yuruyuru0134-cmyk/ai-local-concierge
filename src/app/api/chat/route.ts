@@ -156,10 +156,13 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
   「- [名称](GoogleマップURL) — 種別 ／ spots[i].distanceLabel の値 ／ おすすめ情報があれば一言」
   例: 「- [マクドナルド渋谷店](https://...) — fast_food ／ 約230m ／ 24時間営業・テイクアウト可」
 - おすすめ情報はOSMの tags（cuisine, opening_hours, takeaway, delivery など）から推定して1行で。情報がなければ省略
-- spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Google マップで検索](fallbackUrl)」と表示
-- error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl)」と表示
-- チラシ・特売情報カテゴリの場合は、店舗リストの後に以下を必ず追加:
-  「📰 チラシ・特売はこちら: [シュフーで検索](flyerUrl の値) ／ [Google マップで特売を探す](flyerSearchUrl の値)」
+- spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Google マップで検索](fallbackUrl の実際のURL)」と表示
+- error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl の実際のURL)」と表示し、sale カテゴリなら下記チラシリンクも追加
+- チラシ・特売情報カテゴリ（sale）の場合は、店舗リストの後に以下を必ず追加（error 時も同様）:
+  「📰 チラシ・特売情報:
+  - [シュフーで探す](flyerUrl の実際のURL)
+  - [エリアのチラシをGoogle検索](flyerGoogleUrl の実際のURL)
+  - [Google マップで近くの特売を探す](flyerSearchUrl の実際のURL)」
 - 位置情報がない場合は住所・地域名を聞くこと`
 
     case 'thinking':
@@ -265,12 +268,19 @@ export async function POST(req: Request) {
               }
             }
 
+            // チラシ系URLは area 確定後に生成（エラー時も使う）
+            const flyerExtras = subOptionId === 'sale' ? {
+              flyerUrl: `https://www.shufoo.net/`,
+              flyerGoogleUrl: `https://www.google.com/search?q=${encodeURIComponent((area || '近く') + ' スーパー チラシ 特売情報')}`,
+              flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
+            } : {}
+
             try {
               const overpassData = await fetchOverpass(query, 20000)
               pushElements(overpassData.elements ?? [], subOptionId === 'transport' ? 50 : 20)
             } catch (e) {
               console.error('[searchNearby] Overpass API error:', e)
-              return { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。' }
+              return { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', ...flyerExtras }
             }
 
             // 交通: 500m精密再検索でマージ → 最近隣を確実に捕捉
@@ -300,13 +310,9 @@ export async function POST(req: Request) {
               return { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
             }
 
-            // チラシ・特売の場合はシュフーURLも追加
+            // チラシ・特売の場合はフライヤーURLも追加
             if (subOptionId === 'sale') {
-              return {
-                area, spots, total: spots.length, fallbackUrl,
-                flyerUrl: `https://www.shufoo.net/`,
-                flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
-              }
+              return { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
             }
 
             return { area, spots, total: spots.length, fallbackUrl }
