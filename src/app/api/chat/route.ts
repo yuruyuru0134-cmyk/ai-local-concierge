@@ -61,8 +61,8 @@ function getSurveySubLabel(id: string) {
 
 function getUsefulSubLabel(id: string) {
   const map: Record<string, string> = {
-    food: 'グルメ・飲食店', shop: 'スーパー・買い物', medical: '病院・薬局',
-    sale: 'チラシ・特売情報', transport: '交通・駅', other: 'その他・フリー検索',
+    food: 'グルメ・飲食店', shop: 'スーパー・買い物＆チラシ', medical: '病院・薬局',
+    transport: '交通・駅', other: 'その他・フリー検索',
   }
   return map[id] ?? '周辺検索'
 }
@@ -116,7 +116,6 @@ function getOverpassFilters(subOptionId: string): string[] {
     shop:      ['"shop"~"supermarket|convenience|department_store|drugstore|pharmacy|mall|clothes|electronics|hardware"'],
     medical:   ['"amenity"~"hospital|clinic|pharmacy|doctors|dentist|veterinary"'],
     transport: ['"railway"~"station|halt|tram_stop|subway_entrance"', '"highway"="bus_stop"'],
-    sale:      ['"shop"~"supermarket|convenience|department_store|drugstore|clothes|electronics|furniture|hardware"'],
     other:     ['"amenity"~"."', '"shop"~"."'],
   }
   return filters[subOptionId] ?? ['"amenity"~"."']
@@ -157,8 +156,8 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
   例: 「- [マクドナルド渋谷店](https://...) — fast_food ／ 約230m ／ 24時間営業・テイクアウト可」
 - おすすめ情報はOSMの tags（cuisine, opening_hours, takeaway, delivery など）から推定して1行で。情報がなければ省略
 - spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Google マップで検索](fallbackUrl の実際のURL)」と表示
-- error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl の実際のURL)」と表示し、sale カテゴリなら下記チラシリンクも追加
-- チラシ・特売情報カテゴリ（sale）の場合は、店舗リストの後に以下を必ず追加（error 時も同様）:
+- error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl の実際のURL)」と表示し、shop カテゴリなら下記チラシリンクも追加
+- スーパー・買い物＆チラシカテゴリ（shop）の場合は、店舗リストの後に以下を必ず追加（error 時も同様）:
   「📰 チラシ・特売情報:
   - [シュフーで探す](flyerUrl の実際のURL)
   - [エリアのチラシをGoogle検索](flyerGoogleUrl の実際のURL)
@@ -269,7 +268,7 @@ export async function POST(req: Request) {
             }
 
             // チラシ系URLは area 確定後に生成（エラー時も使う）
-            const flyerExtras = subOptionId === 'sale' ? {
+            const flyerExtras = subOptionId === 'shop' ? {
               flyerUrl: `https://www.shufoo.net/`,
               flyerGoogleUrl: `https://www.google.com/search?q=${encodeURIComponent((area || '近く') + ' スーパー チラシ 特売情報')}`,
               flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
@@ -310,8 +309,8 @@ export async function POST(req: Request) {
               return { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
             }
 
-            // チラシ・特売の場合はフライヤーURLも追加
-            if (subOptionId === 'sale') {
+            // スーパー・買い物＆チラシの場合はフライヤーURLも追加
+            if (subOptionId === 'shop') {
               return { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
             }
 

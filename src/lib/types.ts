@@ -59,9 +59,8 @@ export const MODES: ModeConfig[] = [
     bgGradient: 'from-teal-50 to-teal-100',
     subOptions: [
       { id: 'food',      label: 'グルメ・飲食店',   icon: '🍽️', description: 'レストラン・カフェ・ファストフードなど' },
-      { id: 'shop',      label: 'スーパー・買い物', icon: '🛒', description: 'スーパー・コンビニ・ドラッグストアなど' },
+      { id: 'shop',      label: 'スーパー・買い物＆チラシ', icon: '🛒', description: 'スーパー・コンビニ周辺店舗の検索とチラシ・特売情報' },
       { id: 'medical',   label: '病院・薬局',       icon: '🏥', description: '病院・クリニック・歯科・薬局など' },
-      { id: 'sale',      label: 'チラシ・特売情報', icon: '🏷️', description: '近くのお店のセール・特売情報' },
       { id: 'transport', label: '交通・駅',         icon: '🚉', description: '駅・バス停・交通機関など' },
       { id: 'other',     label: 'その他・フリー検索', icon: '🔎', description: '上記以外の周辺施設を探す' },
     ],
