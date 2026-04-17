@@ -111,11 +111,12 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 - 位置情報がある場合は必ず最初に searchNearby ツールを呼び出すこと（必須）
 - searchNearby の結果を受け取ったら、必ず以下の形式で応答すること
 - 先頭行: 「○件見つかりました（半径1km以内）」（0件でも必ず書く）
-- 各スポットは「- [名称](GoogleマップURL) — 種別」の形式で全件表示
+- 各スポットは以下の形式で全件表示:
+  「- [名称](GoogleマップURL) — 種別 ／ おすすめ情報があれば一言添える（例: 地元で人気の老舗、24時間営業、駐車場あり など）」
+- おすすめ情報はOSMの tags（cuisine, opening_hours, takeaway, delivery, phone など）や施設の種別から推定して簡潔に1行で添える。情報がなければ省略してよい
 - spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Google マップで検索](fallbackUrl)」と表示
 - error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl)」と表示
 - チラシ・特売情報カテゴリの場合は flyerUrl も Markdownリンクで表示
-- AIによる推察・感想・おすすめコメントは一切加えないこと
 - 位置情報がない場合は住所・地域名を聞くこと`
 
     case 'thinking':
@@ -188,7 +189,7 @@ export async function POST(req: Request) {
             }
 
             const fallbackUrl = `https://www.google.com/maps/search/${encodeURIComponent(getUsefulSubLabel(subOptionId))}/@${lat},${lng},15z`
-            const spots: Array<{ name: string; type: string; mapUrl: string }> = []
+            const spots: Array<{ name: string; type: string; mapUrl: string; tags?: Record<string, string> }> = []
             try {
               const controller = new AbortController()
               const timer = setTimeout(() => controller.abort(), 20000)
@@ -207,7 +208,12 @@ export async function POST(req: Request) {
                 const elLng = el.lon ?? el.center?.lon ?? lng
                 const type = el.tags?.amenity ?? el.tags?.shop ?? el.tags?.railway ?? el.tags?.highway ?? ''
                 const mapUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${elLat},${elLng},17z`
-                spots.push({ name, type, mapUrl })
+                // おすすめ情報生成に使えるタグを抽出
+                const usefulTags: Record<string, string> = {}
+                for (const key of ['cuisine', 'opening_hours', 'takeaway', 'delivery', 'wheelchair', 'phone', 'website', 'operator', 'brand', 'description'] as const) {
+                  if (el.tags?.[key]) usefulTags[key] = el.tags[key]
+                }
+                spots.push({ name, type, mapUrl, ...(Object.keys(usefulTags).length > 0 ? { tags: usefulTags } : {}) })
                 if (spots.length >= 20) break
               }
             } catch (e) {
