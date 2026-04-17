@@ -74,6 +74,41 @@ function getThinkingSubLabel(id: string) {
   return map[id] ?? '壁打ち'
 }
 
+// Overpass 共通型
+type OverpassElement = {
+  lat?: number; lon?: number
+  center?: { lat: number; lon: number }
+  tags?: Record<string, string>
+}
+
+// Overpass エンドポイント（エラー時に次へフォールバック）
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+]
+
+async function fetchOverpass(query: string, timeoutMs: number): Promise<{ elements?: OverpassElement[] }> {
+  let lastError: unknown
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        body: `data=${encodeURIComponent(query)}`,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        signal: controller.signal,
+      })
+      clearTimeout(timer)
+      if (res.ok) return res.json() as Promise<{ elements?: OverpassElement[] }>
+    } catch (e) {
+      clearTimeout(timer)
+      lastError = e
+    }
+  }
+  throw lastError ?? new Error('All Overpass endpoints failed')
+}
+
 // Overpass API フィルター（OSMタグ）
 function getOverpassFilters(subOptionId: string): string[] {
   const filters: Record<string, string[]> = {
@@ -208,28 +243,15 @@ export async function POST(req: Request) {
             const limit = subOptionId === 'transport' ? 50 : 30
             const query = `[out:json][timeout:25];(${queryParts});out center ${limit};`
 
-            type OverpassElement = {
-              lat?: number; lon?: number
-              center?: { lat: number; lon: number }
-              tags?: Record<string, string>
-            }
-
             const fallbackUrl = `https://www.google.com/maps/search/${encodeURIComponent(getUsefulSubLabel(subOptionId))}/@${lat},${lng},15z`
             const spots: Array<{ name: string; type: string; mapUrl: string; distanceM?: number; distanceLabel?: string; tags?: Record<string, string> }> = []
-            try {
-              const controller = new AbortController()
-              const timer = setTimeout(() => controller.abort(), 20000)
-              const overpassRes = await fetch('https://overpass-api.de/api/interpreter', {
-                method: 'POST',
-                body: `data=${encodeURIComponent(query)}`,
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                signal: controller.signal,
-              })
-              clearTimeout(timer)
-              const overpassData = await overpassRes.json() as { elements?: OverpassElement[] }
-              for (const el of overpassData.elements ?? []) {
+
+            const pushElements = (elements: OverpassElement[], limit: number) => {
+              for (const el of elements) {
+                if (spots.length >= limit) break
                 const name = el.tags?.name
                 if (!name) continue
+                if (spots.some(s => s.name === name)) continue
                 const elLat = el.lat ?? el.center?.lat ?? lat
                 const elLng = el.lon ?? el.center?.lon ?? lng
                 const type = el.tags?.amenity ?? el.tags?.shop ?? el.tags?.railway ?? el.tags?.highway ?? ''
@@ -240,11 +262,28 @@ export async function POST(req: Request) {
                   if (el.tags?.[key]) usefulTags[key] = el.tags[key]
                 }
                 spots.push({ name, type, mapUrl, distanceM, distanceLabel: formatDist(distanceM), ...(Object.keys(usefulTags).length > 0 ? { tags: usefulTags } : {}) })
-                if (spots.length >= (subOptionId === 'transport' ? 50 : 20)) break
               }
+            }
+
+            try {
+              const overpassData = await fetchOverpass(query, 20000)
+              pushElements(overpassData.elements ?? [], subOptionId === 'transport' ? 50 : 20)
             } catch (e) {
               console.error('[searchNearby] Overpass API error:', e)
               return { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。' }
+            }
+
+            // 交通: 500m精密再検索でマージ → 最近隣を確実に捕捉
+            if (subOptionId === 'transport') {
+              const narrowFilters = getOverpassFilters('transport')
+              const narrowParts = narrowFilters.map(f =>
+                `node[${f}](around:500,${lat},${lng});way[${f}](around:500,${lat},${lng});`
+              ).join('')
+              const narrowQuery = `[out:json][timeout:15];(${narrowParts});out center 20;`
+              try {
+                const narrowData = await fetchOverpass(narrowQuery, 15000)
+                pushElements(narrowData.elements ?? [], 80)
+              } catch { /* 精密検索失敗は無視 */ }
             }
 
             // 交通・駅: 駅とバス停をそれぞれ近い順3件に絞る
