@@ -1,13 +1,17 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { MODES, type ModeConfig } from '@/lib/types'
+import { MODES, PERSONALITIES, type Location, type ModeConfig, type PersonalityId } from '@/lib/types'
 
 interface ModeSelectorProps {
   onSelect: (mode: ModeConfig) => void
+  personality: PersonalityId
+  onPersonalityChange: (id: PersonalityId) => void
+  location: Location | null
+  onChangeLocation: () => void
 }
 
-export function ModeSelector({ onSelect }: ModeSelectorProps) {
+export function ModeSelector({ onSelect, personality, onPersonalityChange, location, onChangeLocation }: ModeSelectorProps) {
   const [focusedIndex, setFocusedIndex] = useState(0)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const containerRef = useRef<HTMLDivElement>(null)
@@ -38,11 +42,17 @@ export function ModeSelector({ onSelect }: ModeSelectorProps) {
   }, [])
 
   const colorMap: Record<string, { border: string; bg: string; text: string }> = {
-    survey:     { border: 'border-blue-400',   bg: 'bg-blue-50',   text: 'text-blue-600'   },
-    flyer:      { border: 'border-green-400',  bg: 'bg-green-50',  text: 'text-green-600'  },
-    restaurant: { border: 'border-orange-400', bg: 'bg-orange-50', text: 'text-orange-600' },
-    thinking:   { border: 'border-purple-400', bg: 'bg-purple-50', text: 'text-purple-600' },
+    survey:  { border: 'border-blue-400',   bg: 'bg-blue-50',   text: 'text-blue-600'   },
+    useful:  { border: 'border-teal-400',   bg: 'bg-teal-50',   text: 'text-teal-600'   },
+    thinking: { border: 'border-purple-400', bg: 'bg-purple-50', text: 'text-purple-600' },
   }
+
+  // 位置情報の表示用テキスト
+  const locationLabel = location?.address
+    ? location.address.split('、')[0].split('，')[0].slice(0, 30)
+    : location
+      ? `${location.lat.toFixed(3)}, ${location.lng.toFixed(3)}`
+      : null
 
   return (
     <div
@@ -50,13 +60,52 @@ export function ModeSelector({ onSelect }: ModeSelectorProps) {
       className="flex flex-col items-center w-full max-w-2xl mx-auto px-4 py-8 outline-none"
       tabIndex={-1}
     >
-      <div className="mb-8 text-center">
+      <div className="mb-6 text-center">
         <h1 className="text-3xl font-bold text-gray-800 mb-2">🤖 マルチモードAI</h1>
         <p className="text-gray-500">使いたいモードを選んでください</p>
         <p className="text-xs text-gray-400 mt-2 hidden sm:block">↑↓ キーで選択 / Enter で決定</p>
-        <p className="text-xs text-gray-400 mt-2 sm:hidden">タップして選択</p>
+
+        {/* 現在地表示 */}
+        <div className="flex items-center justify-center gap-2 mt-3 text-xs">
+          {locationLabel ? (
+            <>
+              <span className="text-gray-400">📍</span>
+              <span className="text-gray-500 truncate max-w-[220px]">{locationLabel}</span>
+              <button
+                onClick={onChangeLocation}
+                className="text-teal-500 underline flex-shrink-0"
+              >
+                変更
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={onChangeLocation}
+              className="text-teal-500 underline"
+            >
+              📍 現在地を設定する
+            </button>
+          )}
+        </div>
       </div>
 
+      {/* キャラクター選択（プルダウン） */}
+      <div className="w-full mb-6">
+        <label className="text-xs text-gray-400 font-medium mb-2 text-center tracking-wide block">AIキャラクター</label>
+        <select
+          value={personality}
+          onChange={e => onPersonalityChange(e.target.value as PersonalityId)}
+          className="w-full px-3 py-2.5 rounded-xl border-2 border-gray-200 bg-white text-sm text-gray-700 focus:outline-none focus:border-indigo-400 transition-colors appearance-none cursor-pointer"
+        >
+          {PERSONALITIES.map(p => (
+            <option key={p.id} value={p.id}>
+              {p.icon} {p.label}（{p.description}）
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* モード一覧 */}
       <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-4">
         {MODES.map((mode, index) => {
           const colors = colorMap[mode.id]

@@ -121,10 +121,31 @@
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply bg-background text-foreground;
+  html, body {
+    @apply font-sans bg-background text-foreground;
+    overflow-x: hidden;
+    max-width: 100vw;
   }
-  html {
-    @apply font-sans;
+  /* 横スクロール禁止・長文折り返し */
+  * {
+    word-break: break-word;
+    overflow-wrap: break-word;
+  }
+  /* コードブロックのみ横スクロール許可 */
+  pre {
+    overflow-x: auto;
+    word-break: normal;
+    overflow-wrap: normal;
+    white-space: pre;
+  }
+}
+
+@layer utilities {
+  /* iPhone ノッチ・ホームインジケーター対応 */
+  .pb-safe {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
   }
 }
