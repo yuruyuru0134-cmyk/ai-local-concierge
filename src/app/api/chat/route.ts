@@ -123,7 +123,8 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 - おすすめ情報はOSMの tags（cuisine, opening_hours, takeaway, delivery など）から推定して1行で。情報がなければ省略
 - spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Google マップで検索](fallbackUrl)」と表示
 - error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl)」と表示
-- チラシ・特売情報カテゴリの場合は flyerUrl も Markdownリンクで表示
+- チラシ・特売情報カテゴリの場合は、店舗リストの後に以下を必ず追加:
+  「📰 チラシ・特売はこちら: [シュフーで検索](flyerUrl の値) ／ [Google マップで特売を探す](flyerSearchUrl の値)」
 - 位置情報がない場合は住所・地域名を聞くこと`
 
     case 'thinking':
@@ -181,13 +182,16 @@ export async function POST(req: Request) {
             const formatDist = (m: number): string =>
               m < 1000 ? `約${Math.round(m / 10) * 10}m` : `約${(m / 1000).toFixed(1)}km`
 
-            // 1. Nominatim で地域名取得
+            // 1. Nominatim で地域名取得（8秒タイムアウト）
             let area = ''
             try {
+              const geoCtrl = new AbortController()
+              const geoTimer = setTimeout(() => geoCtrl.abort(), 8000)
               const geoRes = await fetch(
                 `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=ja`,
-                { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' } }
+                { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' }, signal: geoCtrl.signal }
               )
+              clearTimeout(geoTimer)
               const geoData = await geoRes.json() as { address?: Record<string, string> }
               const addr = geoData.address ?? {}
               const pref = addr.province ?? addr.state ?? ''
@@ -257,11 +261,12 @@ export async function POST(req: Request) {
               return { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
             }
 
-            // チラシ・特売の場合はトクバイURLも追加
+            // チラシ・特売の場合はシュフーURLも追加
             if (subOptionId === 'sale') {
               return {
                 area, spots, total: spots.length, fallbackUrl,
-                flyerUrl: `https://tokubai.co.jp/stores?lat=${lat}&lng=${lng}`,
+                flyerUrl: `https://www.shufoo.net/`,
+                flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
               }
             }
 
