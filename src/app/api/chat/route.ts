@@ -90,9 +90,9 @@ const OVERPASS_ENDPOINTS = [
 // 検索結果キャッシュ（TTL: 5分 / レート制限対策）
 const searchResultCache = new Map<string, { data: unknown; expires: number }>()
 const CACHE_TTL_MS = 5 * 60 * 1000
+const CACHE_TTL_ERROR_MS = 30 * 1000 // エラー結果は30秒だけキャッシュ
 
 function getSearchCacheKey(subOptionId: string, lat: number, lng: number) {
-  // 小数点2桁（約1.1km精度）でキー生成
   return `${subOptionId}:${lat.toFixed(2)}:${lng.toFixed(2)}`
 }
 
@@ -109,8 +109,19 @@ async function fetchOverpass(query: string, timeoutMs: number): Promise<{ elemen
         signal: controller.signal,
       })
       clearTimeout(timer)
-      if (res.ok) return res.json() as Promise<{ elements?: OverpassElement[] }>
-      lastError = new Error(`HTTP ${res.status}`)
+      if (!res.ok) {
+        lastError = new Error(`HTTP ${res.status}`)
+        continue
+      }
+      // awaitしてJSONパースエラーもcatchに落とし次エンドポイントへフォールバック
+      // （OverpassがHTML返却時にres.json()がthrowするケースを捕捉）
+      const data = await res.json() as { elements?: OverpassElement[]; remark?: string }
+      // remarkはOverpassがタイムアウト・レート制限を報告するフィールド
+      if (data.remark && (!data.elements || data.elements.length === 0)) {
+        lastError = new Error(`Overpass remark: ${data.remark}`)
+        continue
+      }
+      return data
     } catch (e) {
       clearTimeout(timer)
       lastError = e
@@ -126,10 +137,150 @@ function getOverpassFilters(subOptionId: string): string[] {
     shop:      ['"shop"~"supermarket|convenience|department_store|drugstore|pharmacy|mall|clothes|electronics|hardware"'],
     medical:   ['"amenity"~"hospital|clinic|pharmacy|doctors|dentist|veterinary"'],
     transport: ['"railway"~"station|halt|tram_stop|subway_entrance"', '"highway"="bus_stop"'],
-    // amenityのみに統一（shop~"."は4サブクエリになりOverpassが重いため削除）
     other:     ['"amenity"~"bank|atm|post_office|library|cinema|theatre|gym|spa|parking|fuel|police|school|place_of_worship|community_centre|charging_station|public_bath"'],
   }
   return filters[subOptionId] ?? ['"amenity"~"."']
+}
+
+type SpotResult = {
+  area: string
+  spots: Array<{ name: string; type: string; mapUrl: string; distanceM?: number; distanceLabel?: string; tags?: Record<string, string> }>
+  total: number
+  fallbackUrl: string
+  error?: string
+  transportMode?: boolean
+  flyerUrl?: string
+  flyerGoogleUrl?: string
+  flyerSearchUrl?: string
+}
+
+async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, fallbackUrl: string): Promise<SpotResult> {
+  const cacheKey = getSearchCacheKey(subOptionId, lat, lng)
+  const cached = searchResultCache.get(cacheKey)
+  if (cached && cached.expires > Date.now()) return cached.data as SpotResult
+
+  const calcDistanceM = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const R = 6371000
+    const φ1 = lat1 * Math.PI / 180
+    const φ2 = lat2 * Math.PI / 180
+    const Δφ = (lat2 - lat1) * Math.PI / 180
+    const Δλ = (lon2 - lon1) * Math.PI / 180
+    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  }
+  const formatDist = (m: number): string =>
+    m < 1000 ? `約${Math.round(m / 10) * 10}m` : `約${(m / 1000).toFixed(1)}km`
+
+  // Overpassクエリ事前構築
+  const radius = subOptionId === 'transport' ? 2000 : 1000
+  const filters = getOverpassFilters(subOptionId)
+  const queryParts = filters.map(f =>
+    `node[${f}](around:${radius},${lat},${lng});way[${f}](around:${radius},${lat},${lng});`
+  ).join('')
+  const overpassLimit = subOptionId === 'transport' ? 50 : 30
+  // fetchタイムアウト8秒に合わせてOverpass内部タイムアウトを7秒に設定
+  const overpassQuery = `[out:json][timeout:7];(${queryParts});out center ${overpassLimit};`
+
+  // NominatimとOverpassを並列実行（直列~40秒→並列最大16秒に短縮）
+  const fetchArea = async (): Promise<string> => {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 5000)
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=ja`,
+        { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' }, signal: ctrl.signal }
+      )
+      clearTimeout(timer)
+      if (!res.ok) return ''
+      const data = await res.json() as { address?: Record<string, string> }
+      const addr = data.address ?? {}
+      const pref = addr.province ?? addr.state ?? ''
+      const city = addr.city ?? addr.town ?? addr.village ?? ''
+      return `${pref}${city ? ' ' + city : ''}`
+    } catch {
+      clearTimeout(timer)
+      return ''
+    }
+  }
+
+  const [areaResult, overpassResult] = await Promise.allSettled([
+    fetchArea(),
+    fetchOverpass(overpassQuery, 8000), // 8秒×2エンドポイント=最大16秒
+  ])
+
+  const area = areaResult.status === 'fulfilled' ? areaResult.value : ''
+
+  const flyerExtras = subOptionId === 'shop' ? {
+    flyerUrl: `https://www.shufoo.net/`,
+    flyerGoogleUrl: `https://www.google.com/search?q=${encodeURIComponent((area || '近く') + ' スーパー チラシ 特売情報')}`,
+    flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
+  } : {}
+
+  if (overpassResult.status === 'rejected') {
+    console.error('[searchNearby] Overpass error:', overpassResult.reason)
+    const errorResult: SpotResult = { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', ...flyerExtras }
+    // エラー結果は短期間キャッシュして連続リトライによるレート制限を防止
+    searchResultCache.set(cacheKey, { data: errorResult, expires: Date.now() + CACHE_TTL_ERROR_MS })
+    return errorResult
+  }
+
+  const spots: SpotResult['spots'] = []
+
+  const pushElements = (elements: OverpassElement[], limit: number) => {
+    for (const el of elements) {
+      if (spots.length >= limit) break
+      const name = el.tags?.name
+      if (!name) continue
+      if (spots.some(s => s.name === name)) continue
+      const elLat = el.lat ?? el.center?.lat ?? lat
+      const elLng = el.lon ?? el.center?.lon ?? lng
+      const type = el.tags?.amenity ?? el.tags?.shop ?? el.tags?.railway ?? el.tags?.highway ?? ''
+      const mapUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${elLat},${elLng},17z`
+      const distanceM = calcDistanceM(lat, lng, elLat, elLng)
+      const usefulTags: Record<string, string> = {}
+      for (const key of ['cuisine', 'opening_hours', 'takeaway', 'delivery', 'wheelchair', 'phone', 'website', 'operator', 'brand', 'description', 'railway', 'highway'] as const) {
+        if (el.tags?.[key]) usefulTags[key] = el.tags[key]
+      }
+      spots.push({ name, type, mapUrl, distanceM, distanceLabel: formatDist(distanceM), ...(Object.keys(usefulTags).length > 0 ? { tags: usefulTags } : {}) })
+    }
+  }
+
+  pushElements(overpassResult.value.elements ?? [], subOptionId === 'transport' ? 50 : 20)
+
+  // 交通: 500m精密再検索でマージ
+  if (subOptionId === 'transport') {
+    const narrowFilters = getOverpassFilters('transport')
+    const narrowParts = narrowFilters.map(f =>
+      `node[${f}](around:500,${lat},${lng});way[${f}](around:500,${lat},${lng});`
+    ).join('')
+    const narrowQuery = `[out:json][timeout:7];(${narrowParts});out center 20;`
+    try {
+      const narrowData = await fetchOverpass(narrowQuery, 8000)
+      pushElements(narrowData.elements ?? [], 80)
+    } catch { /* 精密検索失敗は無視 */ }
+  }
+
+  // 結果生成とキャッシュ保存
+  let resultData: SpotResult
+  if (subOptionId === 'transport') {
+    const stations = spots
+      .filter(s => s.tags?.railway && s.tags.railway !== 'bus_stop')
+      .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
+      .slice(0, 3)
+    const busStops = spots
+      .filter(s => s.type === 'bus_stop' || s.tags?.highway === 'bus_stop')
+      .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
+      .slice(0, 3)
+    const transportSpots = [...stations, ...busStops]
+    resultData = { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
+  } else if (subOptionId === 'shop') {
+    resultData = { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
+  } else {
+    resultData = { area, spots, total: spots.length, fallbackUrl }
+  }
+
+  searchResultCache.set(cacheKey, { data: resultData, expires: Date.now() + CACHE_TTL_MS })
+  return resultData
 }
 
 function getSystemPrompt(mode: Mode, subOptionId: string, personality: PersonalityId): string {
@@ -217,130 +368,13 @@ export async function POST(req: Request) {
             lng: z.number().describe('経度'),
           }),
           execute: async ({ lat, lng }: { lat: number; lng: number }) => {
-            // キャッシュヒット確認
-            const cacheKey = getSearchCacheKey(subOptionId, lat, lng)
-            const cached = searchResultCache.get(cacheKey)
-            if (cached && cached.expires > Date.now()) return cached.data
-
-            const calcDistanceM = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-              const R = 6371000
-              const φ1 = lat1 * Math.PI / 180
-              const φ2 = lat2 * Math.PI / 180
-              const Δφ = (lat2 - lat1) * Math.PI / 180
-              const Δλ = (lon2 - lon1) * Math.PI / 180
-              const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2
-              return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-            }
-            const formatDist = (m: number): string =>
-              m < 1000 ? `約${Math.round(m / 10) * 10}m` : `約${(m / 1000).toFixed(1)}km`
-
-            // Overpassクエリ事前構築
-            const radius = subOptionId === 'transport' ? 2000 : 1000
-            const filters = getOverpassFilters(subOptionId)
-            const queryParts = filters.map(f =>
-              `node[${f}](around:${radius},${lat},${lng});way[${f}](around:${radius},${lat},${lng});`
-            ).join('')
-            const overpassLimit = subOptionId === 'transport' ? 50 : 30
-            const overpassQuery = `[out:json][timeout:15];(${queryParts});out center ${overpassLimit};`
             const fallbackUrl = `https://www.google.com/maps/search/${encodeURIComponent(getUsefulSubLabel(subOptionId))}/@${lat},${lng},15z`
-
-            // NominatimとOverpassを並列実行（直列40秒→並列最大16秒に短縮）
-            const fetchArea = async (): Promise<string> => {
-              const ctrl = new AbortController()
-              const timer = setTimeout(() => ctrl.abort(), 5000)
-              try {
-                const res = await fetch(
-                  `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=ja`,
-                  { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' }, signal: ctrl.signal }
-                )
-                clearTimeout(timer)
-                if (!res.ok) return ''
-                const data = await res.json() as { address?: Record<string, string> }
-                const addr = data.address ?? {}
-                const pref = addr.province ?? addr.state ?? ''
-                const city = addr.city ?? addr.town ?? addr.village ?? ''
-                return `${pref}${city ? ' ' + city : ''}`
-              } catch {
-                clearTimeout(timer)
-                return ''
-              }
+            try {
+              return await searchNearbyImpl(lat, lng, subOptionId, fallbackUrl)
+            } catch (e) {
+              console.error('[searchNearby] unexpected error:', e)
+              return { area: '', spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。' }
             }
-
-            const [areaResult, overpassResult] = await Promise.allSettled([
-              fetchArea(),
-              fetchOverpass(overpassQuery, 8000), // 8秒×2エンドポイント=最大16秒
-            ])
-
-            const area = areaResult.status === 'fulfilled' ? areaResult.value : ''
-
-            const flyerExtras = subOptionId === 'shop' ? {
-              flyerUrl: `https://www.shufoo.net/`,
-              flyerGoogleUrl: `https://www.google.com/search?q=${encodeURIComponent((area || '近く') + ' スーパー チラシ 特売情報')}`,
-              flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
-            } : {}
-
-            if (overpassResult.status === 'rejected') {
-              console.error('[searchNearby] Overpass error:', overpassResult.reason)
-              return { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', ...flyerExtras }
-            }
-
-            const spots: Array<{ name: string; type: string; mapUrl: string; distanceM?: number; distanceLabel?: string; tags?: Record<string, string> }> = []
-
-            const pushElements = (elements: OverpassElement[], limit: number) => {
-              for (const el of elements) {
-                if (spots.length >= limit) break
-                const name = el.tags?.name
-                if (!name) continue
-                if (spots.some(s => s.name === name)) continue
-                const elLat = el.lat ?? el.center?.lat ?? lat
-                const elLng = el.lon ?? el.center?.lon ?? lng
-                const type = el.tags?.amenity ?? el.tags?.shop ?? el.tags?.railway ?? el.tags?.highway ?? ''
-                const mapUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${elLat},${elLng},17z`
-                const distanceM = calcDistanceM(lat, lng, elLat, elLng)
-                const usefulTags: Record<string, string> = {}
-                for (const key of ['cuisine', 'opening_hours', 'takeaway', 'delivery', 'wheelchair', 'phone', 'website', 'operator', 'brand', 'description', 'railway', 'highway'] as const) {
-                  if (el.tags?.[key]) usefulTags[key] = el.tags[key]
-                }
-                spots.push({ name, type, mapUrl, distanceM, distanceLabel: formatDist(distanceM), ...(Object.keys(usefulTags).length > 0 ? { tags: usefulTags } : {}) })
-              }
-            }
-
-            pushElements(overpassResult.value.elements ?? [], subOptionId === 'transport' ? 50 : 20)
-
-            // 交通: 500m精密再検索でマージ
-            if (subOptionId === 'transport') {
-              const narrowFilters = getOverpassFilters('transport')
-              const narrowParts = narrowFilters.map(f =>
-                `node[${f}](around:500,${lat},${lng});way[${f}](around:500,${lat},${lng});`
-              ).join('')
-              const narrowQuery = `[out:json][timeout:10];(${narrowParts});out center 20;`
-              try {
-                const narrowData = await fetchOverpass(narrowQuery, 8000)
-                pushElements(narrowData.elements ?? [], 80)
-              } catch { /* 精密検索失敗は無視 */ }
-            }
-
-            // 結果生成とキャッシュ保存
-            let resultData: unknown
-            if (subOptionId === 'transport') {
-              const stations = spots
-                .filter(s => s.tags?.railway && s.tags.railway !== 'bus_stop')
-                .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
-                .slice(0, 3)
-              const busStops = spots
-                .filter(s => s.type === 'bus_stop' || s.tags?.highway === 'bus_stop')
-                .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
-                .slice(0, 3)
-              const transportSpots = [...stations, ...busStops]
-              resultData = { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
-            } else if (subOptionId === 'shop') {
-              resultData = { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
-            } else {
-              resultData = { area, spots, total: spots.length, fallbackUrl }
-            }
-
-            searchResultCache.set(cacheKey, { data: resultData, expires: Date.now() + CACHE_TTL_MS })
-            return resultData
           },
         },
       },
