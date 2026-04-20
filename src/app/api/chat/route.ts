@@ -74,27 +74,34 @@ function getThinkingSubLabel(id: string) {
   return map[id] ?? '壁打ち'
 }
 
-// Overpass 共通型
+// ---- ユーティリティ（モジュールレベル） ----
+
+function calcDistanceM(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371000
+  const φ1 = lat1 * Math.PI / 180
+  const φ2 = lat2 * Math.PI / 180
+  const Δφ = (lat2 - lat1) * Math.PI / 180
+  const Δλ = (lon2 - lon1) * Math.PI / 180
+  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+function formatDist(m: number): string {
+  return m < 1000 ? `約${Math.round(m / 10) * 10}m` : `約${(m / 1000).toFixed(1)}km`
+}
+
+// ---- Overpass ----
+
 type OverpassElement = {
   lat?: number; lon?: number
   center?: { lat: number; lon: number }
   tags?: Record<string, string>
 }
 
-// Overpass エンドポイント（エラー時に次へフォールバック）
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ]
-
-// 検索結果キャッシュ（TTL: 5分 / レート制限対策）
-const searchResultCache = new Map<string, { data: unknown; expires: number }>()
-const CACHE_TTL_MS = 5 * 60 * 1000
-const CACHE_TTL_ERROR_MS = 30 * 1000 // エラー結果は30秒だけキャッシュ
-
-function getSearchCacheKey(subOptionId: string, lat: number, lng: number) {
-  return `${subOptionId}:${lat.toFixed(2)}:${lng.toFixed(2)}`
-}
 
 async function fetchOverpass(query: string, timeoutMs: number): Promise<{ elements?: OverpassElement[] }> {
   let lastError: unknown
@@ -113,10 +120,8 @@ async function fetchOverpass(query: string, timeoutMs: number): Promise<{ elemen
         lastError = new Error(`HTTP ${res.status}`)
         continue
       }
-      // awaitしてJSONパースエラーもcatchに落とし次エンドポイントへフォールバック
-      // （OverpassがHTML返却時にres.json()がthrowするケースを捕捉）
+      // awaitしてJSONパースエラー（HTML返却等）をcatchし次エンドポイントへフォールバック
       const data = await res.json() as { elements?: OverpassElement[]; remark?: string }
-      // remarkはOverpassがタイムアウト・レート制限を報告するフィールド
       if (data.remark && (!data.elements || data.elements.length === 0)) {
         lastError = new Error(`Overpass remark: ${data.remark}`)
         continue
@@ -130,7 +135,6 @@ async function fetchOverpass(query: string, timeoutMs: number): Promise<{ elemen
   throw lastError ?? new Error('All Overpass endpoints failed')
 }
 
-// Overpass API フィルター（OSMタグ）
 function getOverpassFilters(subOptionId: string): string[] {
   const filters: Record<string, string[]> = {
     food:      ['"amenity"~"restaurant|fast_food|cafe|bar|pub|food_court|ice_cream|bakery"'],
@@ -142,12 +146,96 @@ function getOverpassFilters(subOptionId: string): string[] {
   return filters[subOptionId] ?? ['"amenity"~"."']
 }
 
+// ---- Hot Pepper グルメ API（food カテゴリのフォールバック） ----
+
+type Spot = {
+  name: string
+  type: string
+  mapUrl: string
+  distanceM?: number
+  distanceLabel?: string
+  tags?: Record<string, string>
+}
+
+async function fetchHotPepper(lat: number, lng: number): Promise<Spot[]> {
+  const key = process.env.HOTPEPPER_API_KEY
+  if (!key || key.startsWith('your_')) return []
+
+  const params = new URLSearchParams({
+    key,
+    lat: String(lat),
+    lng: String(lng),
+    range: '3',   // 1km 圏内
+    count: '20',
+    format: 'json',
+  })
+
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 8000)
+  try {
+    const res = await fetch(
+      `https://webservice.recruit.co.jp/hotpepper/gourmet/v1/?${params}`,
+      { signal: ctrl.signal }
+    )
+    clearTimeout(timer)
+    if (!res.ok) return []
+
+    const data = await res.json() as {
+      results: {
+        shop?: Array<{
+          name: string
+          lat: string
+          lng: string
+          genre: { name: string }
+          open?: string
+          budget?: { average?: string }
+          urls: { pc: string }
+        }>
+      }
+    }
+
+    return (data.results.shop ?? []).map(shop => {
+      const elLat = parseFloat(shop.lat)
+      const elLng = parseFloat(shop.lng)
+      const distanceM = calcDistanceM(lat, lng, elLat, elLng)
+      const tags: Record<string, string> = {}
+      if (shop.open) tags.opening_hours = shop.open
+      if (shop.budget?.average) tags.description = `予算: ${shop.budget.average}`
+      return {
+        name: shop.name,
+        type: shop.genre.name,
+        mapUrl: `https://www.google.com/maps/search/${encodeURIComponent(shop.name)}/@${elLat},${elLng},17z`,
+        distanceM,
+        distanceLabel: formatDist(distanceM),
+        ...(Object.keys(tags).length > 0 ? { tags } : {}),
+      }
+    })
+  } catch {
+    clearTimeout(timer)
+    return []
+  }
+}
+
+// ---- キャッシュ ----
+
+const searchResultCache = new Map<string, { data: unknown; expires: number }>()
+const CACHE_TTL_MS = 5 * 60 * 1000
+const CACHE_TTL_ERROR_MS = 30 * 1000
+
+function getSearchCacheKey(subOptionId: string, lat: number, lng: number) {
+  return `${subOptionId}:${lat.toFixed(2)}:${lng.toFixed(2)}`
+}
+
+// ---- 検索メイン ----
+
 type SpotResult = {
   area: string
-  spots: Array<{ name: string; type: string; mapUrl: string; distanceM?: number; distanceLabel?: string; tags?: Record<string, string> }>
+  spots: Spot[]
   total: number
   fallbackUrl: string
+  source?: string
   error?: string
+  errorMessage?: string
   transportMode?: boolean
   flyerUrl?: string
   flyerGoogleUrl?: string
@@ -159,29 +247,16 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
   const cached = searchResultCache.get(cacheKey)
   if (cached && cached.expires > Date.now()) return cached.data as SpotResult
 
-  const calcDistanceM = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
-    const R = 6371000
-    const φ1 = lat1 * Math.PI / 180
-    const φ2 = lat2 * Math.PI / 180
-    const Δφ = (lat2 - lat1) * Math.PI / 180
-    const Δλ = (lon2 - lon1) * Math.PI / 180
-    const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-  }
-  const formatDist = (m: number): string =>
-    m < 1000 ? `約${Math.round(m / 10) * 10}m` : `約${(m / 1000).toFixed(1)}km`
-
-  // Overpassクエリ事前構築
+  // Overpassクエリ構築
   const radius = subOptionId === 'transport' ? 2000 : 1000
   const filters = getOverpassFilters(subOptionId)
   const queryParts = filters.map(f =>
     `node[${f}](around:${radius},${lat},${lng});way[${f}](around:${radius},${lat},${lng});`
   ).join('')
   const overpassLimit = subOptionId === 'transport' ? 50 : 30
-  // fetchタイムアウト8秒に合わせてOverpass内部タイムアウトを7秒に設定
   const overpassQuery = `[out:json][timeout:7];(${queryParts});out center ${overpassLimit};`
 
-  // NominatimとOverpassを並列実行（直列~40秒→並列最大16秒に短縮）
+  // Nominatim（地域名取得）
   const fetchArea = async (): Promise<string> => {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 5000)
@@ -203,9 +278,10 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
     }
   }
 
+  // NominatimとOverpassを並列実行
   const [areaResult, overpassResult] = await Promise.allSettled([
     fetchArea(),
-    fetchOverpass(overpassQuery, 8000), // 8秒×2エンドポイント=最大16秒
+    fetchOverpass(overpassQuery, 8000),
   ])
 
   const area = areaResult.status === 'fulfilled' ? areaResult.value : ''
@@ -216,15 +292,26 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
     flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
   } : {}
 
+  // Overpass失敗 → food はHot Pepperへフォールバック、それ以外はエラー返却
   if (overpassResult.status === 'rejected') {
     console.error('[searchNearby] Overpass error:', overpassResult.reason)
-    const errorResult: SpotResult = { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', ...flyerExtras }
-    // エラー結果は短期間キャッシュして連続リトライによるレート制限を防止
+
+    if (subOptionId === 'food') {
+      const hotPepperSpots = await fetchHotPepper(lat, lng)
+      if (hotPepperSpots.length > 0) {
+        const result: SpotResult = { area, spots: hotPepperSpots, total: hotPepperSpots.length, fallbackUrl, source: 'hotpepper' }
+        searchResultCache.set(cacheKey, { data: result, expires: Date.now() + CACHE_TTL_MS })
+        return result
+      }
+    }
+
+    const errorMessage = `検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
+    const errorResult: SpotResult = { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage, ...flyerExtras }
     searchResultCache.set(cacheKey, { data: errorResult, expires: Date.now() + CACHE_TTL_ERROR_MS })
     return errorResult
   }
 
-  const spots: SpotResult['spots'] = []
+  const spots: Spot[] = []
 
   const pushElements = (elements: OverpassElement[], limit: number) => {
     for (const el of elements) {
@@ -260,7 +347,6 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
     } catch { /* 精密検索失敗は無視 */ }
   }
 
-  // 結果生成とキャッシュ保存
   let resultData: SpotResult
   if (subOptionId === 'transport') {
     const stations = spots
@@ -282,6 +368,8 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
   searchResultCache.set(cacheKey, { data: resultData, expires: Date.now() + CACHE_TTL_MS })
   return resultData
 }
+
+// ---- システムプロンプト ----
 
 function getSystemPrompt(mode: Mode, subOptionId: string, personality: PersonalityId): string {
   const p = getPersonalityPrompt(personality)
@@ -307,6 +395,7 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 - 位置情報がある場合は必ず最初に searchNearby ツールを呼び出すこと（必須）
 - searchNearby の結果を受け取ったら、必ず以下の形式で応答すること
 - 先頭行: 「○件見つかりました（半径1km以内）」（0件でも必ず書く）
+- source フィールドが "hotpepper" の場合は「ホットペッパーグルメのデータを使用」と一言添える
 - 交通・駅カテゴリ（結果に transportMode: true が含まれる場合）の表示形式:
   ## 最寄り駅
   - [駅名](GoogleマップURL) — 種別 ／ distanceLabel の値（例: 約230m）
@@ -317,8 +406,8 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
   「- [名称](GoogleマップURL) — 種別 ／ spots[i].distanceLabel の値 ／ おすすめ情報があれば一言」
   例: 「- [マクドナルド渋谷店](https://...) — fast_food ／ 約230m ／ 24時間営業・テイクアウト可」
 - おすすめ情報はOSMの tags（cuisine, opening_hours, takeaway, delivery など）から推定して1行で。情報がなければ省略
-- spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Google マップで検索](fallbackUrl の実際のURL)」と表示
-- error フィールドがある場合: 「検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Google マップで検索](fallbackUrl の実際のURL)」と表示し、shop カテゴリなら下記チラシリンクも追加
+- spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Googleマップで検索](fallbackUrl の実際のURL)」と表示
+- errorMessage フィールドがある場合: そのフィールドの内容をそのまま出力すること（URLは変更しないこと）
 - スーパー・買い物＆チラシカテゴリ（shop）の場合は、店舗リストの後に以下を必ず追加（error 時も同様）:
   「📰 チラシ・特売情報:
   - [シュフーで探す](flyerUrl の実際のURL)
@@ -338,6 +427,8 @@ ${p}
 まず最初の一言でキャラクターらしく話しかけてから対話を始めてください。`
   }
 }
+
+// ---- API ルート ----
 
 export async function POST(req: Request) {
   const { messages, mode, subOptionId, location, personality } = await req.json() as {
@@ -362,7 +453,7 @@ export async function POST(req: Request) {
       stopWhen: stepCountIs(5),
       tools: {
         searchNearby: {
-          description: 'GPS座標から周辺施設をOpenStreetMap(Overpass API)で検索し、各スポットのGoogleマップリンクを生成する',
+          description: 'GPS座標から周辺施設をOpenStreetMap(Overpass API)またはHot Pepperで検索し、各スポットのGoogleマップリンクを生成する',
           inputSchema: z.object({
             lat: z.number().describe('緯度'),
             lng: z.number().describe('経度'),
@@ -373,7 +464,8 @@ export async function POST(req: Request) {
               return await searchNearbyImpl(lat, lng, subOptionId, fallbackUrl)
             } catch (e) {
               console.error('[searchNearby] unexpected error:', e)
-              return { area: '', spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。' }
+              const errorMessage = `検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
+              return { area: '', spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage }
             }
           },
         },
