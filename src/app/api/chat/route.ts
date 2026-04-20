@@ -87,6 +87,15 @@ const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
 ]
 
+// 検索結果キャッシュ（TTL: 5分 / レート制限対策）
+const searchResultCache = new Map<string, { data: unknown; expires: number }>()
+const CACHE_TTL_MS = 5 * 60 * 1000
+
+function getSearchCacheKey(subOptionId: string, lat: number, lng: number) {
+  // 小数点2桁（約1.1km精度）でキー生成
+  return `${subOptionId}:${lat.toFixed(2)}:${lng.toFixed(2)}`
+}
+
 async function fetchOverpass(query: string, timeoutMs: number): Promise<{ elements?: OverpassElement[] }> {
   let lastError: unknown
   for (const endpoint of OVERPASS_ENDPOINTS) {
@@ -101,6 +110,7 @@ async function fetchOverpass(query: string, timeoutMs: number): Promise<{ elemen
       })
       clearTimeout(timer)
       if (res.ok) return res.json() as Promise<{ elements?: OverpassElement[] }>
+      lastError = new Error(`HTTP ${res.status}`)
     } catch (e) {
       clearTimeout(timer)
       lastError = e
@@ -206,6 +216,13 @@ export async function POST(req: Request) {
             lng: z.number().describe('経度'),
           }),
           execute: async ({ lat, lng }: { lat: number; lng: number }) => {
+            // キャッシュヒット確認
+            const cacheKey = getSearchCacheKey(subOptionId, lat, lng)
+            const cached = searchResultCache.get(cacheKey)
+            if (cached && cached.expires > Date.now()) {
+              return cached.data
+            }
+
             // 2点間の距離計算（Haversine公式）
             const calcDistanceM = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
               const R = 6371000
@@ -307,15 +324,21 @@ export async function POST(req: Request) {
                 .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
                 .slice(0, 3)
               const transportSpots = [...stations, ...busStops]
-              return { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
+              const transportResult = { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
+              searchResultCache.set(cacheKey, { data: transportResult, expires: Date.now() + CACHE_TTL_MS })
+              return transportResult
             }
 
             // スーパー・買い物＆チラシの場合はフライヤーURLも追加
             if (subOptionId === 'shop') {
-              return { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
+              const shopResult = { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
+              searchResultCache.set(cacheKey, { data: shopResult, expires: Date.now() + CACHE_TTL_MS })
+              return shopResult
             }
 
-            return { area, spots, total: spots.length, fallbackUrl }
+            const result = { area, spots, total: spots.length, fallbackUrl }
+            searchResultCache.set(cacheKey, { data: result, expires: Date.now() + CACHE_TTL_MS })
+            return result
           },
         },
       },
