@@ -196,6 +196,7 @@ export async function POST(req: Request) {
       model: google('gemini-2.5-flash'),
       system,
       messages: modelMessages,
+      abortSignal: req.signal,
       stopWhen: stepCountIs(5),
       tools: {
         searchNearby: {
@@ -327,6 +328,7 @@ export async function POST(req: Request) {
     model: google('gemini-2.5-flash'),
     system,
     messages: modelMessages,
+    abortSignal: req.signal,
   })
   return result.toUIMessageStreamResponse()
 }

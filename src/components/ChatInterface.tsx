@@ -47,6 +47,12 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
 
   const { messages, sendMessage, status, stop, error } = useChat({ transport })
 
+  // アンマウント時にストリーミングを停止（メッセージチャネルクローズエラーを防止）
+  useEffect(() => {
+    return () => { stop() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // 自動スクロール
   useEffect(() => {
     if (scrollRef.current) {
