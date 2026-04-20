@@ -216,6 +216,58 @@ async function fetchHotPepper(lat: number, lng: number): Promise<Spot[]> {
   }
 }
 
+// ---- Nominatim POI検索（非foodカテゴリのフォールバック） ----
+
+async function fetchNominatimPOI(lat: number, lng: number, tagKey: string, tagValue: string): Promise<Spot[]> {
+  const delta = 0.012 // ~1.2km
+  const viewbox = `${lng - delta},${lat + delta},${lng + delta},${lat - delta}`
+  const params = new URLSearchParams({ format: 'json', [tagKey]: tagValue, viewbox, bounded: '1', limit: '20', namedetails: '1' })
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 6000)
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?${params}`,
+      { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' }, signal: ctrl.signal }
+    )
+    clearTimeout(timer)
+    if (!res.ok) return []
+    const data = await res.json() as Array<{ display_name: string; namedetails?: { name?: string }; lat: string; lon: string; type: string; class: string }>
+    return data.flatMap(item => {
+      const name = item.namedetails?.name ?? item.display_name.split(',')[0].trim()
+      if (!name) return []
+      const elLat = parseFloat(item.lat)
+      const elLng = parseFloat(item.lon)
+      const distanceM = calcDistanceM(lat, lng, elLat, elLng)
+      return [{ name, type: item.type || item.class, mapUrl: `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${elLat},${elLng},17z`, distanceM, distanceLabel: formatDist(distanceM) }]
+    })
+  } catch {
+    clearTimeout(timer)
+    return []
+  }
+}
+
+const NOMINATIM_FALLBACK_TAGS: Record<string, [string, string][]> = {
+  shop:      [['shop', 'supermarket'], ['shop', 'convenience']],
+  medical:   [['amenity', 'hospital'], ['amenity', 'pharmacy']],
+  transport: [['railway', 'station'], ['highway', 'bus_stop']],
+  other:     [['amenity', 'bank'], ['amenity', 'library']],
+}
+
+async function fetchNominatimFallback(lat: number, lng: number, subOptionId: string): Promise<Spot[]> {
+  const tagPairs = NOMINATIM_FALLBACK_TAGS[subOptionId] ?? []
+  if (tagPairs.length === 0) return []
+  const results = await Promise.allSettled(tagPairs.map(([k, v]) => fetchNominatimPOI(lat, lng, k, v)))
+  const seen = new Set<string>()
+  const spots: Spot[] = []
+  for (const r of results) {
+    if (r.status !== 'fulfilled') continue
+    for (const s of r.value) {
+      if (!seen.has(s.name)) { seen.add(s.name); spots.push(s) }
+    }
+  }
+  return spots.sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
+}
+
 // ---- キャッシュ ----
 
 const searchResultCache = new Map<string, { data: unknown; expires: number }>()
@@ -292,7 +344,7 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
     flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
   } : {}
 
-  // Overpass失敗 → food はHot Pepperへフォールバック、それ以外はエラー返却
+  // Overpass失敗 → food はHot Pepper、非food はNominatimへフォールバック
   if (overpassResult.status === 'rejected') {
     console.error('[searchNearby] Overpass error:', overpassResult.reason)
 
@@ -300,6 +352,13 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
       const hotPepperSpots = await fetchHotPepper(lat, lng)
       if (hotPepperSpots.length > 0) {
         const result: SpotResult = { area, spots: hotPepperSpots, total: hotPepperSpots.length, fallbackUrl, source: 'hotpepper' }
+        searchResultCache.set(cacheKey, { data: result, expires: Date.now() + CACHE_TTL_MS })
+        return result
+      }
+    } else {
+      const nominatimSpots = await fetchNominatimFallback(lat, lng, subOptionId)
+      if (nominatimSpots.length > 0) {
+        const result: SpotResult = { area, spots: nominatimSpots, total: nominatimSpots.length, fallbackUrl, source: 'nominatim', ...flyerExtras }
         searchResultCache.set(cacheKey, { data: result, expires: Date.now() + CACHE_TTL_MS })
         return result
       }
@@ -396,6 +455,7 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 - searchNearby の結果を受け取ったら、必ず以下の形式で応答すること
 - 先頭行: 「○件見つかりました（半径1km以内）」（0件でも必ず書く）
 - source フィールドが "hotpepper" の場合は「ホットペッパーグルメのデータを使用」と一言添える
+- source フィールドが "nominatim" の場合は「OpenStreetMapのデータを使用」と一言添える
 - 交通・駅カテゴリ（結果に transportMode: true が含まれる場合）の表示形式:
   ## 最寄り駅
   - [駅名](GoogleマップURL) — 種別 ／ distanceLabel の値（例: 約230m）
