@@ -165,6 +165,21 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
       .join('')
   }
 
+  // ツール結果のerrorMessageを取得（AIがテキストを生成しなかった場合のフォールバック）
+  const getToolErrorMessage = (msg: (typeof messages)[number]): string | null => {
+    for (const part of msg.parts) {
+      if (!part.type.startsWith('tool-')) continue
+      const p = part as unknown as Record<string, unknown>
+      // AI SDK v5 のツールパーツ構造: state と result が直接パーツに存在する
+      const state = p.state ?? (p.toolInvocation as Record<string, unknown> | undefined)?.state
+      const result = (p.result ?? (p.toolInvocation as Record<string, unknown> | undefined)?.result) as Record<string, unknown> | undefined
+      if (state === 'result' && result && typeof result.errorMessage === 'string') {
+        return result.errorMessage
+      }
+    }
+    return null
+  }
+
   // メッセージの画像パーツ取得
   const getMessageImages = (msg: (typeof messages)[number]): FileUIPart[] => {
     return msg.parts.filter(
@@ -280,12 +295,15 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
         {messages.map((msg, msgIndex) => {
           const text = getMessageText(msg)
           const images = getMessageImages(msg)
+          // AIがテキストを生成しなかった場合、ツール結果のerrorMessageをフォールバック表示
+          const toolErrorMsg = msg.role === 'assistant' && !text ? getToolErrorMessage(msg) : null
+          const displayText = text || toolErrorMsg || ''
           // 自動トリガーの最初のユーザーメッセージは非表示
           const isAutoTrigger = msgIndex === 0
             && msg.role === 'user'
             && mode.id === 'useful'
           if (isAutoTrigger) return null
-          if (!text && images.length === 0 && msg.role !== 'assistant') return null
+          if (!displayText && images.length === 0 && msg.role !== 'assistant') return null
           return (
             <div
               key={msg.id}
@@ -296,7 +314,7 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
                   {PERSONALITIES.find(p => p.id === personality)?.icon ?? '🤖'}
                 </div>
               )}
-              {(text || images.length > 0) && (
+              {(displayText || images.length > 0) && (
                 <div
                   className={`
                     max-w-[80%] min-w-0 overflow-hidden rounded-2xl px-4 py-3 text-sm leading-relaxed
@@ -308,7 +326,7 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
                 >
                   {/* 添付画像表示 */}
                   {images.length > 0 && (
-                    <div className={`flex flex-wrap gap-2 ${text ? 'mb-2' : ''}`}>
+                    <div className={`flex flex-wrap gap-2 ${displayText ? 'mb-2' : ''}`}>
                       {images.map((img, i) => (
                         <img
                           key={i}
@@ -321,10 +339,10 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
                     </div>
                   )}
                   {/* テキスト表示 */}
-                  {text && (
+                  {displayText && (
                     msg.role === 'user'
-                      ? text
-                      : <div className="space-y-0.5">{formatMessage(text)}</div>
+                      ? displayText
+                      : <div className="space-y-0.5">{formatMessage(displayText)}</div>
                   )}
                 </div>
               )}
