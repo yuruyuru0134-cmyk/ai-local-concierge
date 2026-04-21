@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export interface SpotPin {
   name: string
@@ -22,13 +22,14 @@ let mapsPromise: Promise<void> | null = null
 
 function loadGoogleMaps(apiKey: string): Promise<void> {
   if (mapsPromise) return mapsPromise
-  mapsPromise = new Promise(resolve => {
+  mapsPromise = new Promise((resolve, reject) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if ((window as any).google?.maps) { resolve(); return }
     const script = document.createElement('script')
     script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&language=ja`
     script.async = true
     script.onload = () => resolve()
+    script.onerror = () => { mapsPromise = null; reject(new Error('Maps JS API load failed')) }
     document.head.appendChild(script)
   })
   return mapsPromise
@@ -38,10 +39,12 @@ export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMap
   const containerRef = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mapInstanceRef = useRef<any>(null)
+  const [loadError, setLoadError] = useState(false)
 
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
-    if (!apiKey || !containerRef.current) return
+    if (!apiKey) { setLoadError(true); return }
+    if (!containerRef.current) return
 
     loadGoogleMaps(apiKey).then(() => {
       if (!containerRef.current || mapInstanceRef.current) return
@@ -85,7 +88,6 @@ export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMap
           map,
           title: spot.name,
         })
-
         const infoWindow = new G.InfoWindow({
           content: `<div style="font-size:13px;line-height:1.6;max-width:180px">
             <strong>${spot.name}</strong><br/>
@@ -94,7 +96,6 @@ export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMap
               style="color:#1a73e8;font-size:12px">Googleマップで開く ↗</a>
           </div>`,
         })
-
         marker.addListener('click', () => infoWindow.open(map, marker))
         bounds.extend({ lat: spot.lat, lng: spot.lng })
       })
@@ -102,14 +103,24 @@ export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMap
       if (spots.length > 0) {
         map.fitBounds(bounds, { top: 40, right: 20, bottom: 20, left: 20 })
       }
-    })
+    }).catch(() => setLoadError(true))
 
-    return () => {
-      mapInstanceRef.current = null
-    }
+    return () => { mapInstanceRef.current = null }
   // 初回マウント時のみ実行
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  if (loadError) {
+    const fallback = `https://www.google.com/maps/@${centerLat},${centerLng},15z`
+    return (
+      <div className="w-full h-20 rounded-xl border border-gray-200 bg-gray-50 flex items-center justify-center">
+        <a href={fallback} target="_blank" rel="noopener noreferrer"
+          className="text-sm text-blue-600 underline">
+          Googleマップで開く ↗
+        </a>
+      </div>
+    )
+  }
 
   return (
     <div

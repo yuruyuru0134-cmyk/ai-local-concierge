@@ -359,8 +359,11 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
           if (isAutoTrigger) return null
           if (!displayText && images.length === 0 && msg.role !== 'assistant') return null
 
-          // お役立ちモードのアシスタントメッセージにスポットデータがあれば地図表示
-          const spotData = mode.id === 'useful' ? getSpotData(msg) : null
+          // 最初のアシスタントメッセージの直後に地図表示（位置情報があれば必ず表示）
+          const assistantMsgs = messages.filter(m => m.role === 'assistant')
+          const isFirstAssistant = msg.role === 'assistant' && assistantMsgs[0]?.id === msg.id
+          const spotData = isFirstAssistant && mode.id === 'useful' ? getSpotData(msg) : null
+          const showMap = isFirstAssistant && mode.id === 'useful' && !!location
 
           return (
             <div
@@ -406,13 +409,13 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
                   </div>
                 )}
               </div>
-              {/* Googleマップ（スポットデータがある場合） */}
-              {spotData && (
+              {/* Googleマップ（位置情報があれば必ず表示、スポットはあればピン追加） */}
+              {showMap && (
                 <div className="w-full mt-2 pl-9 pr-1">
                   <GoogleMapView
-                    centerLat={spotData.centerLat}
-                    centerLng={spotData.centerLng}
-                    spots={spotData.spots}
+                    centerLat={location.lat}
+                    centerLng={location.lng}
+                    spots={spotData?.spots ?? []}
                   />
                 </div>
               )}
