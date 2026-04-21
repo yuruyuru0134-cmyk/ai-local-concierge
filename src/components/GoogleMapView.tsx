@@ -2,19 +2,19 @@
 
 import { useEffect, useRef, useState } from 'react'
 
-export interface SpotPin {
-  name: string
-  type: string
-  lat: number
-  lng: number
-  mapUrl: string
-  distanceLabel?: string
-}
-
 interface GoogleMapViewProps {
   centerLat: number
   centerLng: number
-  spots: SpotPin[]
+  category: string
+}
+
+// カテゴリ → Google Places タイプ
+const PLACE_TYPE: Record<string, string> = {
+  food:      'restaurant',
+  shop:      'supermarket',
+  medical:   'hospital',
+  transport: 'transit_station',
+  other:     'establishment',
 }
 
 // スクリプトの重複ロードを防ぐシングルトン
@@ -24,9 +24,9 @@ function loadGoogleMaps(apiKey: string): Promise<void> {
   if (mapsPromise) return mapsPromise
   mapsPromise = new Promise((resolve, reject) => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if ((window as any).google?.maps) { resolve(); return }
+    if ((window as any).google?.maps?.places) { resolve(); return }
     const script = document.createElement('script')
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&language=ja`
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&language=ja`
     script.async = true
     script.onload = () => resolve()
     script.onerror = () => { mapsPromise = null; reject(new Error('Maps JS API load failed')) }
@@ -35,7 +35,7 @@ function loadGoogleMaps(apiKey: string): Promise<void> {
   return mapsPromise
 }
 
-export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMapViewProps) {
+export default function GoogleMapView({ centerLat, centerLng, category }: GoogleMapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mapInstanceRef = useRef<any>(null)
@@ -51,9 +51,10 @@ export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMap
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const G = (window as any).google.maps
+      const center = { lat: centerLat, lng: centerLng }
 
       const map = new G.Map(containerRef.current, {
-        center: { lat: centerLat, lng: centerLng },
+        center,
         zoom: 15,
         gestureHandling: 'greedy',
         mapTypeControl: false,
@@ -64,7 +65,7 @@ export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMap
 
       // 現在地マーカー（青丸）
       new G.Marker({
-        position: { lat: centerLat, lng: centerLng },
+        position: center,
         map,
         title: '現在地',
         icon: {
@@ -78,31 +79,40 @@ export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMap
         zIndex: 999,
       })
 
-      // スポットマーカー
-      const bounds = new G.LatLngBounds()
-      bounds.extend({ lat: centerLat, lng: centerLng })
+      // Google Places 周辺検索
+      const service = new G.places.PlacesService(map)
+      service.nearbySearch(
+        {
+          location: center,
+          radius: 1000,
+          type: PLACE_TYPE[category] ?? 'establishment',
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (results: any[], status: string) => {
+          if (status !== G.places.PlacesServiceStatus.OK || !results) return
 
-      spots.forEach(spot => {
-        const marker = new G.Marker({
-          position: { lat: spot.lat, lng: spot.lng },
-          map,
-          title: spot.name,
-        })
-        const infoWindow = new G.InfoWindow({
-          content: `<div style="font-size:13px;line-height:1.6;max-width:180px">
-            <strong>${spot.name}</strong><br/>
-            ${spot.type}${spot.distanceLabel ? ' / ' + spot.distanceLabel : ''}
-            <br/><a href="${spot.mapUrl}" target="_blank" rel="noopener noreferrer"
-              style="color:#1a73e8;font-size:12px">Googleマップで開く ↗</a>
-          </div>`,
-        })
-        marker.addListener('click', () => infoWindow.open(map, marker))
-        bounds.extend({ lat: spot.lat, lng: spot.lng })
-      })
+          results.forEach(place => {
+            if (!place.geometry?.location) return
 
-      if (spots.length > 0) {
-        map.fitBounds(bounds, { top: 40, right: 20, bottom: 20, left: 20 })
-      }
+            const marker = new G.Marker({
+              position: place.geometry.location,
+              map,
+              title: place.name,
+            })
+
+            const rating = place.rating ? `⭐ ${place.rating}` : ''
+            const vicinity = place.vicinity ?? ''
+            const infoWindow = new G.InfoWindow({
+              content: `<div style="font-size:13px;line-height:1.6;max-width:200px">
+                <strong>${place.name}</strong><br/>
+                ${rating}${rating && vicinity ? ' · ' : ''}${vicinity}
+              </div>`,
+            })
+
+            marker.addListener('click', () => infoWindow.open(map, marker))
+          })
+        },
+      )
     }).catch(() => setLoadError(true))
 
     return () => { mapInstanceRef.current = null }
@@ -111,7 +121,7 @@ export default function GoogleMapView({ centerLat, centerLng, spots }: GoogleMap
   }, [])
 
   if (loadError) {
-    const fallback = `https://www.google.com/maps/@${centerLat},${centerLng},15z`
+    const fallback = `https://www.google.com/maps/search/${PLACE_TYPE[category] ?? 'establishment'}/@${centerLat},${centerLng},15z`
     return (
       <div className="w-full h-20 rounded-xl border border-gray-200 bg-gray-50 flex items-center justify-center">
         <a href={fallback} target="_blank" rel="noopener noreferrer"
