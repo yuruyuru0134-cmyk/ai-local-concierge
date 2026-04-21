@@ -47,10 +47,32 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
 
   const { messages, sendMessage, status, stop, error } = useChat({ transport })
 
-  // アンマウント時にストリーミングを停止（メッセージチャネルクローズエラーを防止）
+  // 常に最新のstopを参照（stale closure 防止）
+  const stopRef = useRef(stop)
+  stopRef.current = stop
+
+  // アンマウント時にストリーミングを停止
   useEffect(() => {
-    return () => { stop() }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      try { stopRef.current() } catch { /* abort errors は無視 */ }
+    }
+  }, [])
+
+  // fetch abort / message channel close 系のunhandledRejectionを抑制
+  useEffect(() => {
+    const handler = (e: PromiseRejectionEvent) => {
+      const msg = String(e.reason?.message ?? e.reason ?? '')
+      if (
+        e.reason?.name === 'AbortError' ||
+        msg.includes('aborted') ||
+        msg.includes('message channel closed') ||
+        msg.includes('The user aborted a request')
+      ) {
+        e.preventDefault()
+      }
+    }
+    window.addEventListener('unhandledrejection', handler)
+    return () => window.removeEventListener('unhandledrejection', handler)
   }, [])
 
   // 自動スクロール
