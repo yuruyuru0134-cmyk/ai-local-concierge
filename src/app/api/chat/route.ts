@@ -184,8 +184,6 @@ function getSearchCacheKey(subOptionId: string, lat: number, lng: number) {
 type Spot = {
   name: string
   type: string
-  lat: number
-  lng: number
   mapUrl: string
   distanceM?: number
   distanceLabel?: string
@@ -194,8 +192,6 @@ type Spot = {
 
 type SpotResult = {
   area: string
-  centerLat: number
-  centerLng: number
   spots: Spot[]
   total: number
   fallbackUrl: string
@@ -226,10 +222,8 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
   const flyerExtras = subOptionId === 'shop' ? {
     flyerUrl: `https://www.shufoo.net/`,
     flyerGoogleUrl: `https://www.google.com/search?q=${encodeURIComponent('近く スーパー チラシ 特売情報')}`,
-    flyerSearchUrl: `https://www.openstreetmap.org/#map=15/${lat}/${lng}`,
+    flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
   } : {}
-
-  const base = { centerLat: lat, centerLng: lng, fallbackUrl }
 
   // エリア名とOverpassを並列実行
   const [areaResult, overpassResult] = await Promise.allSettled([
@@ -241,8 +235,8 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
 
   if (overpassResult.status === 'rejected') {
     console.error('[searchNearby] Overpass error:', overpassResult.reason)
-    const errorMessage = `周辺施設の取得に失敗しました。地図から直接確認してください:\n- [OpenStreetMapで周辺を確認](${fallbackUrl})`
-    const errorResult: SpotResult = { ...base, area, spots: [], total: 0, error: 'データ取得に失敗しました。', errorMessage, ...flyerExtras }
+    const errorMessage = `周辺施設の取得に失敗しました。Googleマップから直接検索してください:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
+    const errorResult: SpotResult = { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage, ...flyerExtras }
     searchResultCache.set(cacheKey, { data: errorResult, expires: Date.now() + CACHE_TTL_ERROR_MS })
     return errorResult
   }
@@ -260,14 +254,14 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
     const elLat = el.lat ?? el.center?.lat ?? lat
     const elLng = el.lon ?? el.center?.lon ?? lng
     const type = el.tags?.amenity ?? el.tags?.shop ?? el.tags?.railway ?? el.tags?.highway ?? ''
-    const mapUrl = `https://www.openstreetmap.org/?mlat=${elLat}&mlon=${elLng}&zoom=17`
+    const mapUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${elLat},${elLng},17z`
     const distanceM = calcDistanceM(lat, lng, elLat, elLng)
     const usefulTags: Record<string, string> = {}
     for (const key of ['cuisine', 'opening_hours', 'takeaway', 'delivery', 'wheelchair', 'phone', 'website', 'operator', 'brand', 'railway', 'highway'] as const) {
       if (el.tags?.[key]) usefulTags[key] = el.tags[key]
     }
     spots.push({
-      name, type, lat: elLat, lng: elLng, mapUrl,
+      name, type, mapUrl,
       distanceM, distanceLabel: formatDist(distanceM),
       ...(Object.keys(usefulTags).length > 0 ? { tags: usefulTags } : {}),
     })
@@ -284,12 +278,12 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
       .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
       .slice(0, 3)
     const transportSpots = [...stations, ...busStops]
-    const result: SpotResult = { ...base, area, spots: transportSpots, total: transportSpots.length, transportMode: true }
+    const result: SpotResult = { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
     searchResultCache.set(cacheKey, { data: result, expires: Date.now() + CACHE_TTL_MS })
     return result
   }
 
-  const resultData: SpotResult = { ...base, area, spots, total: spots.length, ...flyerExtras }
+  const resultData: SpotResult = { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
   searchResultCache.set(cacheKey, { data: resultData, expires: Date.now() + CACHE_TTL_MS })
   return resultData
 }
@@ -322,12 +316,13 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 - 先頭行: 「○件見つかりました（半径1km以内）」（0件でも必ず書く）
 - 交通・駅カテゴリ（transportMode: true の場合）の表示形式:
   ## 最寄り駅
-  - [駅名](OpenStreetMapURL) — 種別 ／ distanceLabel（例: 約230m）
+  - [駅名](GoogleマップURL) — 種別 ／ distanceLabel（例: 約230m）
   ## 最寄りバス停
-  - [バス停名](OpenStreetMapURL) — bus_stop ／ distanceLabel
+  - [バス停名](GoogleマップURL) — bus_stop ／ distanceLabel
   （それぞれ見つからなければ「見つかりませんでした」と表示）
 - 交通以外のカテゴリの表示形式:
-  「- [名称](OpenStreetMapURL) — 種別 ／ distanceLabel」
+  「- [名称](GoogleマップURL) — 種別 ／ distanceLabel ／ おすすめ情報があれば一言」
+  例: 「- [マクドナルド渋谷店](https://...) — fast_food ／ 約230m ／ 24時間営業」
 - spots が空・0件の場合: errorMessage フィールドの内容をそのまま出力すること
 - errorMessage フィールドがある場合: そのフィールドの内容をそのまま出力すること
 - スーパー・買い物カテゴリ（shop）の場合は、店舗リストの後に必ず追加:
@@ -380,13 +375,13 @@ export async function POST(req: Request) {
             lng: z.number().describe('経度'),
           }),
           execute: async ({ lat, lng }: { lat: number; lng: number }) => {
-            const fallbackUrl = `https://www.openstreetmap.org/#map=15/${lat}/${lng}`
+            const fallbackUrl = `https://www.google.com/maps/search/${encodeURIComponent(getUsefulSubLabel(subOptionId))}/@${lat},${lng},15z`
             try {
               return await searchNearbyImpl(lat, lng, subOptionId, fallbackUrl)
             } catch (e) {
               console.error('[searchNearby] unexpected error:', e)
-              const errorMessage = `検索でエラーが発生しました。地図から直接確認してください:\n- [OpenStreetMapで周辺を確認](${fallbackUrl})`
-              return { area: '', centerLat: lat, centerLng: lng, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage }
+              const errorMessage = `検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
+              return { area: '', spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage }
             }
           },
         },
