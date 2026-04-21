@@ -2,8 +2,21 @@
 
 import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport, type FileUIPart } from 'ai'
+import dynamic from 'next/dynamic'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { PERSONALITIES, type Location, type ModeConfig, type PersonalityId, type SubOption } from '@/lib/types'
+import type { SpotPin } from './MapView'
+
+const MapView = dynamic(() => import('./MapView'), {
+  ssr: false,
+  loading: () => <div className="w-full h-64 rounded-xl bg-gray-100 animate-pulse mt-2" />,
+})
+
+interface SpotData {
+  centerLat: number
+  centerLng: number
+  spots: SpotPin[]
+}
 
 interface AttachedImage {
   dataUrl: string
@@ -192,11 +205,40 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
     for (const part of msg.parts) {
       if (!part.type.startsWith('tool-')) continue
       const p = part as unknown as Record<string, unknown>
-      // AI SDK v5 のツールパーツ構造: state と result が直接パーツに存在する
       const state = p.state ?? (p.toolInvocation as Record<string, unknown> | undefined)?.state
       const result = (p.result ?? (p.toolInvocation as Record<string, unknown> | undefined)?.result) as Record<string, unknown> | undefined
       if (state === 'result' && result && typeof result.errorMessage === 'string') {
         return result.errorMessage
+      }
+    }
+    return null
+  }
+
+  // ツール結果からスポットデータを取得（地図表示用）
+  const getSpotData = (msg: (typeof messages)[number]): SpotData | null => {
+    if (msg.role !== 'assistant') return null
+    for (const part of msg.parts) {
+      if (!part.type.startsWith('tool-')) continue
+      const p = part as unknown as Record<string, unknown>
+      const state = p.state ?? (p.toolInvocation as Record<string, unknown> | undefined)?.state
+      const result = (p.result ?? (p.toolInvocation as Record<string, unknown> | undefined)?.result) as Record<string, unknown> | undefined
+      if (state !== 'result' || !result) continue
+      const { spots, centerLat, centerLng } = result as { spots?: unknown; centerLat?: unknown; centerLng?: unknown }
+      if (
+        Array.isArray(spots) &&
+        spots.length > 0 &&
+        typeof centerLat === 'number' &&
+        typeof centerLng === 'number'
+      ) {
+        const pins: SpotPin[] = spots.filter(
+          (s): s is SpotPin =>
+            s !== null &&
+            typeof s === 'object' &&
+            typeof (s as SpotPin).lat === 'number' &&
+            typeof (s as SpotPin).lng === 'number' &&
+            typeof (s as SpotPin).name === 'string',
+        )
+        return pins.length > 0 ? { centerLat, centerLng, spots: pins } : null
       }
     }
     return null
@@ -317,55 +359,65 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
         {messages.map((msg, msgIndex) => {
           const text = getMessageText(msg)
           const images = getMessageImages(msg)
-          // AIがテキストを生成しなかった場合、ツール結果のerrorMessageをフォールバック表示
           const toolErrorMsg = msg.role === 'assistant' && !text ? getToolErrorMessage(msg) : null
           const displayText = text || toolErrorMsg || ''
+          const spotData = mode.id === 'useful' ? getSpotData(msg) : null
           // 自動トリガーの最初のユーザーメッセージは非表示
-          const isAutoTrigger = msgIndex === 0
-            && msg.role === 'user'
-            && mode.id === 'useful'
+          const isAutoTrigger = msgIndex === 0 && msg.role === 'user' && mode.id === 'useful'
           if (isAutoTrigger) return null
           if (!displayText && images.length === 0 && msg.role !== 'assistant') return null
           return (
             <div
               key={msg.id}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
             >
-              {msg.role === 'assistant' && (
-                <div className="w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center text-sm flex-shrink-0 mr-2 mt-1">
-                  {PERSONALITIES.find(p => p.id === personality)?.icon ?? '🤖'}
-                </div>
-              )}
-              {(displayText || images.length > 0) && (
-                <div
-                  className={`
-                    max-w-[80%] min-w-0 overflow-hidden rounded-2xl px-4 py-3 text-sm leading-relaxed
-                    ${msg.role === 'user'
-                      ? `${colors.bubble} text-white rounded-br-sm`
-                      : 'bg-white text-gray-800 shadow-sm border border-gray-100 rounded-bl-sm'
-                    }
-                  `}
-                >
-                  {/* 添付画像表示 */}
-                  {images.length > 0 && (
-                    <div className={`flex flex-wrap gap-2 ${displayText ? 'mb-2' : ''}`}>
-                      {images.map((img, i) => (
-                        <img
-                          key={i}
-                          src={img.url}
-                          alt="添付画像"
-                          className="max-w-full max-h-60 rounded-lg object-contain cursor-pointer"
-                          onClick={() => window.open(img.url, '_blank')}
-                        />
-                      ))}
-                    </div>
-                  )}
-                  {/* テキスト表示 */}
-                  {displayText && (
-                    msg.role === 'user'
-                      ? displayText
-                      : <div className="space-y-0.5">{formatMessage(displayText)}</div>
-                  )}
+              <div className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {msg.role === 'assistant' && (
+                  <div className="w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center text-sm flex-shrink-0 mr-2 mt-1">
+                    {PERSONALITIES.find(p => p.id === personality)?.icon ?? '🤖'}
+                  </div>
+                )}
+                {(displayText || images.length > 0) && (
+                  <div
+                    className={`
+                      max-w-[80%] min-w-0 overflow-hidden rounded-2xl px-4 py-3 text-sm leading-relaxed
+                      ${msg.role === 'user'
+                        ? `${colors.bubble} text-white rounded-br-sm`
+                        : 'bg-white text-gray-800 shadow-sm border border-gray-100 rounded-bl-sm'
+                      }
+                    `}
+                  >
+                    {/* 添付画像表示 */}
+                    {images.length > 0 && (
+                      <div className={`flex flex-wrap gap-2 ${displayText ? 'mb-2' : ''}`}>
+                        {images.map((img, i) => (
+                          <img
+                            key={i}
+                            src={img.url}
+                            alt="添付画像"
+                            className="max-w-full max-h-60 rounded-lg object-contain cursor-pointer"
+                            onClick={() => window.open(img.url, '_blank')}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {/* テキスト表示 */}
+                    {displayText && (
+                      msg.role === 'user'
+                        ? displayText
+                        : <div className="space-y-0.5">{formatMessage(displayText)}</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* OpenStreetMap 地図表示（お役立ちモードのアシスタントメッセージのみ） */}
+              {spotData && (
+                <div className="w-full mt-2 pl-9 pr-2">
+                  <MapView
+                    centerLat={spotData.centerLat}
+                    centerLng={spotData.centerLng}
+                    spots={spotData.spots}
+                  />
                 </div>
               )}
             </div>

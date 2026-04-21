@@ -74,7 +74,7 @@ function getThinkingSubLabel(id: string) {
   return map[id] ?? '壁打ち'
 }
 
-// ---- ユーティリティ（モジュールレベル） ----
+// ---- ユーティリティ ----
 
 function calcDistanceM(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000
@@ -90,182 +90,72 @@ function formatDist(m: number): string {
   return m < 1000 ? `約${Math.round(m / 10) * 10}m` : `約${(m / 1000).toFixed(1)}km`
 }
 
-// ---- Overpass ----
-
-type OverpassElement = {
-  lat?: number; lon?: number
-  center?: { lat: number; lon: number }
-  tags?: Record<string, string>
-}
-
-const OVERPASS_ENDPOINTS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-]
-
-async function fetchOverpass(query: string, timeoutMs: number): Promise<{ elements?: OverpassElement[] }> {
-  let lastError: unknown
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
-    try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        body: `data=${encodeURIComponent(query)}`,
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal: controller.signal,
-      })
-      clearTimeout(timer)
-      if (!res.ok) {
-        lastError = new Error(`HTTP ${res.status}`)
-        continue
-      }
-      // awaitしてJSONパースエラー（HTML返却等）をcatchし次エンドポイントへフォールバック
-      const data = await res.json() as { elements?: OverpassElement[]; remark?: string }
-      if (data.remark && (!data.elements || data.elements.length === 0)) {
-        lastError = new Error(`Overpass remark: ${data.remark}`)
-        continue
-      }
-      return data
-    } catch (e) {
-      clearTimeout(timer)
-      lastError = e
-    }
-  }
-  throw lastError ?? new Error('All Overpass endpoints failed')
-}
-
-function getOverpassFilters(subOptionId: string): string[] {
-  const filters: Record<string, string[]> = {
-    food:      ['"amenity"~"restaurant|fast_food|cafe|bar|pub|food_court|ice_cream|bakery"'],
-    shop:      ['"shop"~"supermarket|convenience|department_store|drugstore|pharmacy|mall|clothes|electronics|hardware"'],
-    medical:   ['"amenity"~"hospital|clinic|pharmacy|doctors|dentist|veterinary"'],
-    transport: ['"railway"~"station|halt|tram_stop|subway_entrance"', '"highway"="bus_stop"'],
-    other:     ['"amenity"~"bank|atm|post_office|library|cinema|theatre|gym|spa|parking|fuel|police|school|place_of_worship|community_centre|charging_station|public_bath"'],
-  }
-  return filters[subOptionId] ?? ['"amenity"~"."']
-}
-
-// ---- Hot Pepper グルメ API（food カテゴリのフォールバック） ----
+// ---- Nominatim POI 検索 ----
 
 type Spot = {
   name: string
   type: string
+  lat: number
+  lng: number
   mapUrl: string
   distanceM?: number
   distanceLabel?: string
-  tags?: Record<string, string>
 }
 
-async function fetchHotPepper(lat: number, lng: number): Promise<Spot[]> {
-  const key = process.env.HOTPEPPER_API_KEY
-  if (!key || key.startsWith('your_')) return []
+const NOMINATIM_TAGS: Record<string, [string, string][]> = {
+  food:      [['amenity', 'restaurant'], ['amenity', 'fast_food'], ['amenity', 'cafe']],
+  shop:      [['shop', 'supermarket'], ['shop', 'convenience'], ['shop', 'department_store']],
+  medical:   [['amenity', 'hospital'], ['amenity', 'pharmacy'], ['amenity', 'clinic']],
+  transport: [['railway', 'station'], ['highway', 'bus_stop']],
+  other:     [['amenity', 'bank'], ['amenity', 'library'], ['amenity', 'post_office'], ['amenity', 'fuel']],
+}
 
+async function fetchNominatimPOI(
+  centerLat: number,
+  centerLng: number,
+  tagKey: string,
+  tagValue: string,
+  delta: number,
+): Promise<Spot[]> {
+  const viewbox = `${centerLng - delta},${centerLat + delta},${centerLng + delta},${centerLat - delta}`
   const params = new URLSearchParams({
-    key,
-    lat: String(lat),
-    lng: String(lng),
-    range: '3',   // 1km 圏内
-    count: '20',
     format: 'json',
+    [tagKey]: tagValue,
+    viewbox,
+    bounded: '1',
+    limit: '20',
+    namedetails: '1',
   })
-
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), 8000)
   try {
     const res = await fetch(
-      `https://webservice.recruit.co.jp/hotpepper/gourmet/v1/?${params}`,
-      { signal: ctrl.signal }
-    )
-    clearTimeout(timer)
-    if (!res.ok) return []
-
-    const data = await res.json() as {
-      results: {
-        shop?: Array<{
-          name: string
-          lat: string
-          lng: string
-          genre: { name: string }
-          open?: string
-          budget?: { average?: string }
-          urls: { pc: string }
-        }>
-      }
-    }
-
-    return (data.results.shop ?? []).map(shop => {
-      const elLat = parseFloat(shop.lat)
-      const elLng = parseFloat(shop.lng)
-      const distanceM = calcDistanceM(lat, lng, elLat, elLng)
-      const tags: Record<string, string> = {}
-      if (shop.open) tags.opening_hours = shop.open
-      if (shop.budget?.average) tags.description = `予算: ${shop.budget.average}`
-      return {
-        name: shop.name,
-        type: shop.genre.name,
-        mapUrl: `https://www.google.com/maps/search/${encodeURIComponent(shop.name)}/@${elLat},${elLng},17z`,
-        distanceM,
-        distanceLabel: formatDist(distanceM),
-        ...(Object.keys(tags).length > 0 ? { tags } : {}),
-      }
-    })
-  } catch {
-    clearTimeout(timer)
-    return []
-  }
-}
-
-// ---- Nominatim POI検索（非foodカテゴリのフォールバック） ----
-
-async function fetchNominatimPOI(lat: number, lng: number, tagKey: string, tagValue: string): Promise<Spot[]> {
-  const delta = 0.012 // ~1.2km
-  const viewbox = `${lng - delta},${lat + delta},${lng + delta},${lat - delta}`
-  const params = new URLSearchParams({ format: 'json', [tagKey]: tagValue, viewbox, bounded: '1', limit: '20', namedetails: '1' })
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), 6000)
-  try {
-    const res = await fetch(
       `https://nominatim.openstreetmap.org/search?${params}`,
-      { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' }, signal: ctrl.signal }
+      { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' }, signal: ctrl.signal },
     )
     clearTimeout(timer)
     if (!res.ok) return []
-    const data = await res.json() as Array<{ display_name: string; namedetails?: { name?: string }; lat: string; lon: string; type: string; class: string }>
+    const data = await res.json() as Array<{
+      display_name: string
+      namedetails?: { name?: string }
+      lat: string
+      lon: string
+      type: string
+      class: string
+    }>
     return data.flatMap(item => {
       const name = item.namedetails?.name ?? item.display_name.split(',')[0].trim()
       if (!name) return []
       const elLat = parseFloat(item.lat)
       const elLng = parseFloat(item.lon)
-      const distanceM = calcDistanceM(lat, lng, elLat, elLng)
-      return [{ name, type: item.type || item.class, mapUrl: `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${elLat},${elLng},17z`, distanceM, distanceLabel: formatDist(distanceM) }]
+      const distanceM = calcDistanceM(centerLat, centerLng, elLat, elLng)
+      const mapUrl = `https://www.openstreetmap.org/?mlat=${elLat}&mlon=${elLng}&zoom=17`
+      return [{ name, type: item.type || item.class, lat: elLat, lng: elLng, mapUrl, distanceM, distanceLabel: formatDist(distanceM) }]
     })
   } catch {
     clearTimeout(timer)
     return []
   }
-}
-
-const NOMINATIM_FALLBACK_TAGS: Record<string, [string, string][]> = {
-  shop:      [['shop', 'supermarket'], ['shop', 'convenience']],
-  medical:   [['amenity', 'hospital'], ['amenity', 'pharmacy']],
-  transport: [['railway', 'station'], ['highway', 'bus_stop']],
-  other:     [['amenity', 'bank'], ['amenity', 'library']],
-}
-
-async function fetchNominatimFallback(lat: number, lng: number, subOptionId: string): Promise<Spot[]> {
-  const tagPairs = NOMINATIM_FALLBACK_TAGS[subOptionId] ?? []
-  if (tagPairs.length === 0) return []
-  const results = await Promise.allSettled(tagPairs.map(([k, v]) => fetchNominatimPOI(lat, lng, k, v)))
-  const seen = new Set<string>()
-  const spots: Spot[] = []
-  for (const r of results) {
-    if (r.status !== 'fulfilled') continue
-    for (const s of r.value) {
-      if (!seen.has(s.name)) { seen.add(s.name); spots.push(s) }
-    }
-  }
-  return spots.sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
 }
 
 // ---- キャッシュ ----
@@ -282,6 +172,8 @@ function getSearchCacheKey(subOptionId: string, lat: number, lng: number) {
 
 type SpotResult = {
   area: string
+  centerLat: number
+  centerLng: number
   spots: Spot[]
   total: number
   fallbackUrl: string
@@ -299,23 +191,14 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
   const cached = searchResultCache.get(cacheKey)
   if (cached && cached.expires > Date.now()) return cached.data as SpotResult
 
-  // Overpassクエリ構築
-  const radius = subOptionId === 'transport' ? 2000 : 1000
-  const filters = getOverpassFilters(subOptionId)
-  const queryParts = filters.map(f =>
-    `node[${f}](around:${radius},${lat},${lng});way[${f}](around:${radius},${lat},${lng});`
-  ).join('')
-  const overpassLimit = subOptionId === 'transport' ? 50 : 30
-  const overpassQuery = `[out:json][timeout:7];(${queryParts});out center ${overpassLimit};`
-
-  // Nominatim（地域名取得）
+  // 逆ジオコーディングでエリア名取得
   const fetchArea = async (): Promise<string> => {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 5000)
     try {
       const res = await fetch(
         `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&accept-language=ja`,
-        { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' }, signal: ctrl.signal }
+        { headers: { 'User-Agent': 'AI-Useful-Chatbot/1.0 (contact: yuruyuru.0134@gmail.com)' }, signal: ctrl.signal },
       )
       clearTimeout(timer)
       if (!res.ok) return ''
@@ -330,10 +213,13 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
     }
   }
 
-  // NominatimとOverpassを並列実行
-  const [areaResult, overpassResult] = await Promise.allSettled([
+  const tagPairs = NOMINATIM_TAGS[subOptionId] ?? []
+  const delta = subOptionId === 'transport' ? 0.02 : 0.012
+
+  // エリア名取得とPOI検索を並列実行
+  const [areaResult, ...spotResults] = await Promise.allSettled([
     fetchArea(),
-    fetchOverpass(overpassQuery, 8000),
+    ...tagPairs.map(([k, v]) => fetchNominatimPOI(lat, lng, k, v, delta)),
   ])
 
   const area = areaResult.status === 'fulfilled' ? areaResult.value : ''
@@ -341,87 +227,39 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
   const flyerExtras = subOptionId === 'shop' ? {
     flyerUrl: `https://www.shufoo.net/`,
     flyerGoogleUrl: `https://www.google.com/search?q=${encodeURIComponent((area || '近く') + ' スーパー チラシ 特売情報')}`,
-    flyerSearchUrl: `https://www.google.com/maps/search/スーパー+特売/@${lat},${lng},15z`,
+    flyerSearchUrl: `https://www.openstreetmap.org/search?query=supermarket&near=${lat},${lng}`,
   } : {}
 
-  // Overpass失敗 → food はHot Pepper、非food はNominatimへフォールバック
-  if (overpassResult.status === 'rejected') {
-    console.error('[searchNearby] Overpass error:', overpassResult.reason)
-
-    if (subOptionId === 'food') {
-      const hotPepperSpots = await fetchHotPepper(lat, lng)
-      if (hotPepperSpots.length > 0) {
-        const result: SpotResult = { area, spots: hotPepperSpots, total: hotPepperSpots.length, fallbackUrl, source: 'hotpepper' }
-        searchResultCache.set(cacheKey, { data: result, expires: Date.now() + CACHE_TTL_MS })
-        return result
-      }
-    } else {
-      const nominatimSpots = await fetchNominatimFallback(lat, lng, subOptionId)
-      if (nominatimSpots.length > 0) {
-        const result: SpotResult = { area, spots: nominatimSpots, total: nominatimSpots.length, fallbackUrl, source: 'nominatim', ...flyerExtras }
-        searchResultCache.set(cacheKey, { data: result, expires: Date.now() + CACHE_TTL_MS })
-        return result
-      }
+  // 結果マージ・重複除去・距離順ソート
+  const seen = new Set<string>()
+  const allSpots: Spot[] = []
+  for (const r of spotResults) {
+    if (r.status !== 'fulfilled') continue
+    for (const s of r.value) {
+      if (!seen.has(s.name)) { seen.add(s.name); allSpots.push(s) }
     }
+  }
+  allSpots.sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
 
-    const errorMessage = `検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
-    const errorResult: SpotResult = { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage, ...flyerExtras }
+  const base = { area, centerLat: lat, centerLng: lng, fallbackUrl }
+
+  if (allSpots.length === 0) {
+    const errorMessage = `周辺で施設が見つかりませんでした。地図から直接確認してください:\n- [OpenStreetMapで周辺を確認](${fallbackUrl})`
+    const errorResult: SpotResult = { ...base, spots: [], total: 0, error: '周辺施設が見つかりませんでした。', errorMessage, ...flyerExtras }
     searchResultCache.set(cacheKey, { data: errorResult, expires: Date.now() + CACHE_TTL_ERROR_MS })
     return errorResult
   }
 
-  const spots: Spot[] = []
-
-  const pushElements = (elements: OverpassElement[], limit: number) => {
-    for (const el of elements) {
-      if (spots.length >= limit) break
-      const name = el.tags?.name
-      if (!name) continue
-      if (spots.some(s => s.name === name)) continue
-      const elLat = el.lat ?? el.center?.lat ?? lat
-      const elLng = el.lon ?? el.center?.lon ?? lng
-      const type = el.tags?.amenity ?? el.tags?.shop ?? el.tags?.railway ?? el.tags?.highway ?? ''
-      const mapUrl = `https://www.google.com/maps/search/${encodeURIComponent(name)}/@${elLat},${elLng},17z`
-      const distanceM = calcDistanceM(lat, lng, elLat, elLng)
-      const usefulTags: Record<string, string> = {}
-      for (const key of ['cuisine', 'opening_hours', 'takeaway', 'delivery', 'wheelchair', 'phone', 'website', 'operator', 'brand', 'description', 'railway', 'highway'] as const) {
-        if (el.tags?.[key]) usefulTags[key] = el.tags[key]
-      }
-      spots.push({ name, type, mapUrl, distanceM, distanceLabel: formatDist(distanceM), ...(Object.keys(usefulTags).length > 0 ? { tags: usefulTags } : {}) })
-    }
-  }
-
-  pushElements(overpassResult.value.elements ?? [], subOptionId === 'transport' ? 50 : 20)
-
-  // 交通: 500m精密再検索でマージ
-  if (subOptionId === 'transport') {
-    const narrowFilters = getOverpassFilters('transport')
-    const narrowParts = narrowFilters.map(f =>
-      `node[${f}](around:500,${lat},${lng});way[${f}](around:500,${lat},${lng});`
-    ).join('')
-    const narrowQuery = `[out:json][timeout:7];(${narrowParts});out center 20;`
-    try {
-      const narrowData = await fetchOverpass(narrowQuery, 8000)
-      pushElements(narrowData.elements ?? [], 80)
-    } catch { /* 精密検索失敗は無視 */ }
-  }
-
   let resultData: SpotResult
   if (subOptionId === 'transport') {
-    const stations = spots
-      .filter(s => s.tags?.railway && s.tags.railway !== 'bus_stop')
-      .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
-      .slice(0, 3)
-    const busStops = spots
-      .filter(s => s.type === 'bus_stop' || s.tags?.highway === 'bus_stop')
-      .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
-      .slice(0, 3)
+    const stations = allSpots.filter(s => s.type === 'station' || s.type === 'halt' || s.type === 'tram_stop').slice(0, 3)
+    const busStops = allSpots.filter(s => s.type === 'bus_stop').slice(0, 3)
     const transportSpots = [...stations, ...busStops]
-    resultData = { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
+    resultData = { ...base, spots: transportSpots, total: transportSpots.length, transportMode: true }
   } else if (subOptionId === 'shop') {
-    resultData = { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
+    resultData = { ...base, spots: allSpots.slice(0, 20), total: allSpots.length, ...flyerExtras }
   } else {
-    resultData = { area, spots, total: spots.length, fallbackUrl }
+    resultData = { ...base, spots: allSpots.slice(0, 20), total: allSpots.length }
   }
 
   searchResultCache.set(cacheKey, { data: resultData, expires: Date.now() + CACHE_TTL_MS })
@@ -454,25 +292,21 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 - 位置情報がある場合は必ず最初に searchNearby ツールを呼び出すこと（必須）
 - searchNearby の結果を受け取ったら、必ず以下の形式で応答すること
 - 先頭行: 「○件見つかりました（半径1km以内）」（0件でも必ず書く）
-- source フィールドが "hotpepper" の場合は「ホットペッパーグルメのデータを使用」と一言添える
-- source フィールドが "nominatim" の場合は「OpenStreetMapのデータを使用」と一言添える
 - 交通・駅カテゴリ（結果に transportMode: true が含まれる場合）の表示形式:
   ## 最寄り駅
-  - [駅名](GoogleマップURL) — 種別 ／ distanceLabel の値（例: 約230m）
+  - [駅名](OpenStreetMapURL) — 種別 ／ distanceLabel の値（例: 約230m）
   （駅・バス停それぞれ見つからなければ「見つかりませんでした」と表示）
   ## 最寄りバス停
-  - [バス停名](GoogleマップURL) — bus_stop ／ distanceLabel の値
+  - [バス停名](OpenStreetMapURL) — bus_stop ／ distanceLabel の値
 - 交通以外のカテゴリの表示形式:
-  「- [名称](GoogleマップURL) — 種別 ／ spots[i].distanceLabel の値 ／ おすすめ情報があれば一言」
-  例: 「- [マクドナルド渋谷店](https://...) — fast_food ／ 約230m ／ 24時間営業・テイクアウト可」
-- おすすめ情報はOSMの tags（cuisine, opening_hours, takeaway, delivery など）から推定して1行で。情報がなければ省略
-- spots が空・0件の場合: 「0件見つかりました（半径1km以内）\n\n周辺で見つかりませんでした。以下のリンクから直接検索できます:\n- [Googleマップで検索](fallbackUrl の実際のURL)」と表示
+  「- [名称](OpenStreetMapURL) — 種別 ／ spots[i].distanceLabel の値」
+  例: 「- [マクドナルド渋谷店](https://www.openstreetmap.org/...) — fast_food ／ 約230m」
+- spots が空・0件の場合: errorMessage フィールドの内容をそのまま出力すること
 - errorMessage フィールドがある場合: そのフィールドの内容をそのまま出力すること（URLは変更しないこと）
 - スーパー・買い物＆チラシカテゴリ（shop）の場合は、店舗リストの後に以下を必ず追加（error 時も同様）:
   「📰 チラシ・特売情報:
   - [シュフーで探す](flyerUrl の実際のURL)
-  - [エリアのチラシをGoogle検索](flyerGoogleUrl の実際のURL)
-  - [Google マップで近くの特売を探す](flyerSearchUrl の実際のURL)」
+  - [エリアのチラシをGoogle検索](flyerGoogleUrl の実際のURL)」
 - 位置情報がない場合は住所・地域名を聞くこと`
 
     case 'thinking':
@@ -513,19 +347,19 @@ export async function POST(req: Request) {
       stopWhen: stepCountIs(5),
       tools: {
         searchNearby: {
-          description: 'GPS座標から周辺施設をOpenStreetMap(Overpass API)またはHot Pepperで検索し、各スポットのGoogleマップリンクを生成する',
+          description: 'GPS座標から周辺施設をOpenStreetMap(Nominatim)で検索し、各スポットのOpenStreetMapリンクと地図表示用の座標を返す',
           inputSchema: z.object({
             lat: z.number().describe('緯度'),
             lng: z.number().describe('経度'),
           }),
           execute: async ({ lat, lng }: { lat: number; lng: number }) => {
-            const fallbackUrl = `https://www.google.com/maps/search/${encodeURIComponent(getUsefulSubLabel(subOptionId))}/@${lat},${lng},15z`
+            const fallbackUrl = `https://www.openstreetmap.org/#map=15/${lat}/${lng}`
             try {
               return await searchNearbyImpl(lat, lng, subOptionId, fallbackUrl)
             } catch (e) {
               console.error('[searchNearby] unexpected error:', e)
-              const errorMessage = `検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
-              return { area: '', spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage }
+              const errorMessage = `検索でエラーが発生しました。地図から直接確認してください:\n- [OpenStreetMapで周辺を確認](${fallbackUrl})`
+              return { area: '', centerLat: lat, centerLng: lng, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage }
             }
           },
         },
