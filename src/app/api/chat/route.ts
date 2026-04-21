@@ -184,6 +184,8 @@ function getSearchCacheKey(subOptionId: string, lat: number, lng: number) {
 type Spot = {
   name: string
   type: string
+  lat: number
+  lng: number
   mapUrl: string
   distanceM?: number
   distanceLabel?: string
@@ -192,6 +194,8 @@ type Spot = {
 
 type SpotResult = {
   area: string
+  centerLat: number
+  centerLng: number
   spots: Spot[]
   total: number
   fallbackUrl: string
@@ -233,10 +237,12 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
 
   const area = areaResult.status === 'fulfilled' ? areaResult.value : ''
 
+  const base = { centerLat: lat, centerLng: lng, fallbackUrl }
+
   if (overpassResult.status === 'rejected') {
     console.error('[searchNearby] Overpass error:', overpassResult.reason)
     const errorMessage = `周辺施設の取得に失敗しました。Googleマップから直接検索してください:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
-    const errorResult: SpotResult = { area, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage, ...flyerExtras }
+    const errorResult: SpotResult = { ...base, area, spots: [], total: 0, error: 'データ取得に失敗しました。', errorMessage, ...flyerExtras }
     searchResultCache.set(cacheKey, { data: errorResult, expires: Date.now() + CACHE_TTL_ERROR_MS })
     return errorResult
   }
@@ -261,7 +267,7 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
       if (el.tags?.[key]) usefulTags[key] = el.tags[key]
     }
     spots.push({
-      name, type, mapUrl,
+      name, type, lat: elLat, lng: elLng, mapUrl,
       distanceM, distanceLabel: formatDist(distanceM),
       ...(Object.keys(usefulTags).length > 0 ? { tags: usefulTags } : {}),
     })
@@ -278,12 +284,12 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
       .sort((a, b) => (a.distanceM ?? 0) - (b.distanceM ?? 0))
       .slice(0, 3)
     const transportSpots = [...stations, ...busStops]
-    const result: SpotResult = { area, spots: transportSpots, total: transportSpots.length, fallbackUrl, transportMode: true }
+    const result: SpotResult = { ...base, area, spots: transportSpots, total: transportSpots.length, transportMode: true }
     searchResultCache.set(cacheKey, { data: result, expires: Date.now() + CACHE_TTL_MS })
     return result
   }
 
-  const resultData: SpotResult = { area, spots, total: spots.length, fallbackUrl, ...flyerExtras }
+  const resultData: SpotResult = { ...base, area, spots, total: spots.length, ...flyerExtras }
   searchResultCache.set(cacheKey, { data: resultData, expires: Date.now() + CACHE_TTL_MS })
   return resultData
 }
@@ -381,7 +387,7 @@ export async function POST(req: Request) {
             } catch (e) {
               console.error('[searchNearby] unexpected error:', e)
               const errorMessage = `検索でエラーが発生しました。以下のリンクから直接検索してください:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
-              return { area: '', spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage }
+              return { area: '', centerLat: lat, centerLng: lng, spots: [], total: 0, fallbackUrl, error: 'データ取得に失敗しました。', errorMessage }
             }
           },
         },

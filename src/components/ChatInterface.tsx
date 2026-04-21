@@ -4,14 +4,18 @@ import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport, type FileUIPart } from 'ai'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { PERSONALITIES, type Location, type ModeConfig, type PersonalityId, type SubOption } from '@/lib/types'
-import EmbedMapView from './EmbedMapView'
+import dynamic from 'next/dynamic'
+import type { SpotPin } from './GoogleMapView'
 
-const CATEGORY_QUERY: Record<string, string> = {
-  food:      'グルメ 飲食店 レストラン',
-  shop:      'スーパーマーケット コンビニエンスストア',
-  medical:   '病院 薬局 クリニック',
-  transport: '駅 バス停',
-  other:     '施設 店舗',
+const GoogleMapView = dynamic(() => import('./GoogleMapView'), {
+  ssr: false,
+  loading: () => <div className="w-full h-64 rounded-xl bg-gray-100 animate-pulse" />,
+})
+
+interface SpotData {
+  centerLat: number
+  centerLng: number
+  spots: SpotPin[]
 }
 
 interface AttachedImage {
@@ -210,6 +214,29 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
     return null
   }
 
+  // ツール結果からスポットデータを取得（地図表示用）
+  const getSpotData = (msg: (typeof messages)[number]): SpotData | null => {
+    if (msg.role !== 'assistant') return null
+    for (const part of msg.parts) {
+      if (!part.type.startsWith('tool-')) continue
+      const p = part as unknown as Record<string, unknown>
+      const state = p.state ?? (p.toolInvocation as Record<string, unknown> | undefined)?.state
+      const result = (p.result ?? (p.toolInvocation as Record<string, unknown> | undefined)?.result) as Record<string, unknown> | undefined
+      if (state !== 'result' || !result) continue
+      const { spots, centerLat, centerLng } = result as { spots?: unknown; centerLat?: unknown; centerLng?: unknown }
+      if (!Array.isArray(spots) || typeof centerLat !== 'number' || typeof centerLng !== 'number') continue
+      const pins = spots.filter(
+        (s): s is SpotPin =>
+          s !== null && typeof s === 'object' &&
+          typeof (s as SpotPin).lat === 'number' &&
+          typeof (s as SpotPin).lng === 'number' &&
+          typeof (s as SpotPin).name === 'string',
+      )
+      if (pins.length > 0) return { centerLat, centerLng, spots: pins }
+    }
+    return null
+  }
+
   // メッセージの画像パーツ取得
   const getMessageImages = (msg: (typeof messages)[number]): FileUIPart[] => {
     return msg.parts.filter(
@@ -332,13 +359,8 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
           if (isAutoTrigger) return null
           if (!displayText && images.length === 0 && msg.role !== 'assistant') return null
 
-          // お役立ちモードの最初のアシスタントメッセージ直後にマップを表示
-          const assistantMsgs = messages.filter(m => m.role === 'assistant')
-          const showMap =
-            mode.id === 'useful' &&
-            location &&
-            msg.role === 'assistant' &&
-            assistantMsgs[0]?.id === msg.id
+          // お役立ちモードのアシスタントメッセージにスポットデータがあれば地図表示
+          const spotData = mode.id === 'useful' ? getSpotData(msg) : null
 
           return (
             <div
@@ -384,13 +406,13 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
                   </div>
                 )}
               </div>
-              {/* Googleマップ埋め込み（最初のアシスタントメッセージ直後） */}
-              {showMap && (
+              {/* Googleマップ（スポットデータがある場合） */}
+              {spotData && (
                 <div className="w-full mt-2 pl-9 pr-1">
-                  <EmbedMapView
-                    lat={location.lat}
-                    lng={location.lng}
-                    query={CATEGORY_QUERY[subOption.id] ?? '施設'}
+                  <GoogleMapView
+                    centerLat={spotData.centerLat}
+                    centerLng={spotData.centerLng}
+                    spots={spotData.spots}
                   />
                 </div>
               )}
