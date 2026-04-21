@@ -4,6 +4,15 @@ import { useChat } from '@ai-sdk/react'
 import { DefaultChatTransport, type FileUIPart } from 'ai'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { PERSONALITIES, type Location, type ModeConfig, type PersonalityId, type SubOption } from '@/lib/types'
+import EmbedMapView from './EmbedMapView'
+
+const CATEGORY_QUERY: Record<string, string> = {
+  food:      'グルメ 飲食店 レストラン',
+  shop:      'スーパーマーケット コンビニエンスストア',
+  medical:   '病院 薬局 クリニック',
+  transport: '駅 バス停',
+  other:     '施設 店舗',
+}
 
 interface AttachedImage {
   dataUrl: string
@@ -322,46 +331,67 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
           const isAutoTrigger = msgIndex === 0 && msg.role === 'user' && mode.id === 'useful'
           if (isAutoTrigger) return null
           if (!displayText && images.length === 0 && msg.role !== 'assistant') return null
+
+          // お役立ちモードの最初のアシスタントメッセージ直後にマップを表示
+          const assistantMsgs = messages.filter(m => m.role === 'assistant')
+          const showMap =
+            mode.id === 'useful' &&
+            location &&
+            msg.role === 'assistant' &&
+            assistantMsgs[0]?.id === msg.id
+
           return (
             <div
               key={msg.id}
-              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
             >
-              {msg.role === 'assistant' && (
-                <div className="w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center text-sm flex-shrink-0 mr-2 mt-1">
-                  {PERSONALITIES.find(p => p.id === personality)?.icon ?? '🤖'}
-                </div>
-              )}
-              {(displayText || images.length > 0) && (
-                <div
-                  className={`
-                    max-w-[80%] min-w-0 overflow-hidden rounded-2xl px-4 py-3 text-sm leading-relaxed
-                    ${msg.role === 'user'
-                      ? `${colors.bubble} text-white rounded-br-sm`
-                      : 'bg-white text-gray-800 shadow-sm border border-gray-100 rounded-bl-sm'
-                    }
-                  `}
-                >
-                  {/* 添付画像表示 */}
-                  {images.length > 0 && (
-                    <div className={`flex flex-wrap gap-2 ${displayText ? 'mb-2' : ''}`}>
-                      {images.map((img, i) => (
-                        <img
-                          key={i}
-                          src={img.url}
-                          alt="添付画像"
-                          className="max-w-full max-h-60 rounded-lg object-contain cursor-pointer"
-                          onClick={() => window.open(img.url, '_blank')}
-                        />
-                      ))}
-                    </div>
-                  )}
-                  {/* テキスト表示 */}
-                  {displayText && (
-                    msg.role === 'user'
-                      ? displayText
-                      : <div className="space-y-0.5">{formatMessage(displayText)}</div>
-                  )}
+              <div className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {msg.role === 'assistant' && (
+                  <div className="w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center text-sm flex-shrink-0 mr-2 mt-1">
+                    {PERSONALITIES.find(p => p.id === personality)?.icon ?? '🤖'}
+                  </div>
+                )}
+                {(displayText || images.length > 0) && (
+                  <div
+                    className={`
+                      max-w-[80%] min-w-0 overflow-hidden rounded-2xl px-4 py-3 text-sm leading-relaxed
+                      ${msg.role === 'user'
+                        ? `${colors.bubble} text-white rounded-br-sm`
+                        : 'bg-white text-gray-800 shadow-sm border border-gray-100 rounded-bl-sm'
+                      }
+                    `}
+                  >
+                    {/* 添付画像表示 */}
+                    {images.length > 0 && (
+                      <div className={`flex flex-wrap gap-2 ${displayText ? 'mb-2' : ''}`}>
+                        {images.map((img, i) => (
+                          <img
+                            key={i}
+                            src={img.url}
+                            alt="添付画像"
+                            className="max-w-full max-h-60 rounded-lg object-contain cursor-pointer"
+                            onClick={() => window.open(img.url, '_blank')}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {/* テキスト表示 */}
+                    {displayText && (
+                      msg.role === 'user'
+                        ? displayText
+                        : <div className="space-y-0.5">{formatMessage(displayText)}</div>
+                    )}
+                  </div>
+                )}
+              </div>
+              {/* Googleマップ埋め込み（最初のアシスタントメッセージ直後） */}
+              {showMap && (
+                <div className="w-full mt-2 pl-9 pr-1">
+                  <EmbedMapView
+                    lat={location.lat}
+                    lng={location.lng}
+                    query={CATEGORY_QUERY[subOption.id] ?? '施設'}
+                  />
                 </div>
               )}
             </div>
