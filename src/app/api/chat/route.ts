@@ -289,7 +289,10 @@ async function searchNearbyImpl(lat: number, lng: number, subOptionId: string, f
     return result
   }
 
-  const resultData: SpotResult = { ...base, area, spots, total: spots.length, ...flyerExtras }
+  const noResultMessage = spots.length === 0
+    ? `この付近では以上です。さらに詳しく探したい方はこちらのリンクからどうぞ:\n- [Googleマップで${getUsefulSubLabel(subOptionId)}を検索](${fallbackUrl})`
+    : undefined
+  const resultData: SpotResult = { ...base, area, spots, total: spots.length, ...flyerExtras, ...(noResultMessage ? { errorMessage: noResultMessage } : {}) }
   searchResultCache.set(cacheKey, { data: resultData, expires: Date.now() + CACHE_TTL_MS })
   return resultData
 }
@@ -319,7 +322,7 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 【厳守ルール】
 - 位置情報がある場合は必ず最初に searchNearby ツールを呼び出すこと（必須）
 - searchNearby の結果を受け取ったら、必ず以下の形式で応答すること
-- 先頭行: 「○件見つかりました（半径1km以内）」（0件でも必ず書く）
+- 先頭行: 「○件見つかりました（半径1km以内）」（0件の場合は先頭行を省略し、errorMessage の内容をそのまま出力すること）
 - 交通・駅カテゴリ（transportMode: true の場合）の表示形式:
   ## 最寄り駅
   - [駅名](GoogleマップURL) — 種別 ／ distanceLabel（例: 約230m）
