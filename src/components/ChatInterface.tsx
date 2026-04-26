@@ -340,6 +340,16 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
               key={msg.id}
               className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
             >
+              {/* Googleマップ（先に表示） */}
+              {showMap && (
+                <div className="w-full mb-2">
+                  <GoogleMapView
+                    centerLat={location.lat}
+                    centerLng={location.lng}
+                    category={subOption.id}
+                  />
+                </div>
+              )}
               <div className={`flex w-full ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 {msg.role === 'assistant' && (
                   <div className="w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center text-sm flex-shrink-0 mr-2 mt-1">
@@ -379,14 +389,18 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
                   </div>
                 )}
               </div>
-              {/* Googleマップ（Places API で周辺検索結果を表示） */}
-              {showMap && (
-                <div className="w-full mt-2 pl-9 pr-1">
-                  <GoogleMapView
-                    centerLat={location.lat}
-                    centerLng={location.lng}
-                    category={subOption.id}
-                  />
+              {/* 「他にも知りたいようでしたらこちらをどうぞ」リンク */}
+              {showMap && location && (
+                <div className="w-full mt-2 pl-2">
+                  <a
+                    href={`https://www.google.com/maps/search/${encodeURIComponent(subOption.label)}/@${location.lat},${location.lng},15z`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-teal-600 hover:text-teal-800 underline underline-offset-2"
+                  >
+                    他にも知りたいようでしたらこちらをどうぞ
+                    <span>↗</span>
+                  </a>
                 </div>
               )}
             </div>

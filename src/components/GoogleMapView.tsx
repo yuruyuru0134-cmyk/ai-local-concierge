@@ -8,6 +8,13 @@ interface GoogleMapViewProps {
   category: string
 }
 
+interface PlaceInfo {
+  name: string
+  rating?: number
+  vicinity?: string
+  placeId?: string
+}
+
 // カテゴリ → Google Places タイプ
 const PLACE_TYPE: Record<string, string> = {
   food:      'restaurant',
@@ -40,6 +47,7 @@ export default function GoogleMapView({ centerLat, centerLng, category }: Google
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mapInstanceRef = useRef<any>(null)
   const [loadError, setLoadError] = useState(false)
+  const [places, setPlaces] = useState<PlaceInfo[]>([])
 
   useEffect(() => {
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
@@ -91,6 +99,8 @@ export default function GoogleMapView({ centerLat, centerLng, category }: Google
         (results: any[], status: string) => {
           if (status !== G.places.PlacesServiceStatus.OK || !results) return
 
+          const placeInfos: PlaceInfo[] = []
+
           results.forEach(place => {
             if (!place.geometry?.location) return
 
@@ -110,7 +120,16 @@ export default function GoogleMapView({ centerLat, centerLng, category }: Google
             })
 
             marker.addListener('click', () => infoWindow.open(map, marker))
+
+            placeInfos.push({
+              name: place.name,
+              rating: place.rating,
+              vicinity: place.vicinity,
+              placeId: place.place_id,
+            })
           })
+
+          setPlaces(placeInfos.slice(0, 8))
         },
       )
     }).catch(() => setLoadError(true))
@@ -133,9 +152,37 @@ export default function GoogleMapView({ centerLat, centerLng, category }: Google
   }
 
   return (
-    <div
-      ref={containerRef}
-      className="w-full h-64 rounded-xl overflow-hidden border border-gray-200 shadow-sm"
-    />
+    <div>
+      <div
+        ref={containerRef}
+        className="w-full h-64 rounded-xl overflow-hidden border border-gray-200 shadow-sm"
+      />
+      {places.length > 0 && (
+        <div className="mt-2 divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
+          {places.map((p, i) => (
+            <a
+              key={i}
+              href={p.placeId ? `https://www.google.com/maps/place/?q=place_id:${p.placeId}` : '#'}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-start gap-2 px-3 py-2 hover:bg-gray-50 transition-colors"
+            >
+              <span className="text-base flex-shrink-0 mt-0.5">📍</span>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium text-gray-800 truncate">{p.name}</div>
+                {(p.rating || p.vicinity) && (
+                  <div className="text-xs text-gray-500 truncate">
+                    {p.rating ? `⭐ ${p.rating}` : ''}
+                    {p.rating && p.vicinity ? ' · ' : ''}
+                    {p.vicinity ?? ''}
+                  </div>
+                )}
+              </div>
+              <span className="text-xs text-gray-400 flex-shrink-0 mt-1">↗</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
