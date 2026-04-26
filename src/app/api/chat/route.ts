@@ -322,18 +322,17 @@ function getSystemPrompt(mode: Mode, subOptionId: string, personality: Personali
 【厳守ルール】
 - 位置情報がある場合は必ず最初に searchNearby ツールを呼び出すこと（必須）
 - searchNearby の結果を受け取ったら、必ず以下の形式で応答すること
-- 先頭行: 「○件見つかりました（半径1km以内）」（0件の場合は先頭行を省略し、errorMessage の内容をそのまま出力すること）
+- 先頭行: 「○件見つかりました（半径1km以内）」（0件・エラーの場合は何も出力しないこと）
 - 交通・駅カテゴリ（transportMode: true の場合）の表示形式:
   ## 最寄り駅
   - [駅名](GoogleマップURL) — 種別 ／ distanceLabel（例: 約230m）
   ## 最寄りバス停
   - [バス停名](GoogleマップURL) — bus_stop ／ distanceLabel
-  （それぞれ見つからなければ「見つかりませんでした」と表示）
+  （それぞれ見つからなければ何も表示しない）
 - 交通以外のカテゴリの表示形式:
   「- [名称](GoogleマップURL) — 種別 ／ distanceLabel ／ おすすめ情報があれば一言」
   例: 「- [マクドナルド渋谷店](https://...) — fast_food ／ 約230m ／ 24時間営業」
-- spots が空・0件の場合: errorMessage フィールドの内容をそのまま出力すること
-- errorMessage フィールドがある場合: そのフィールドの内容をそのまま出力すること
+- spots が空・0件の場合 / error / errorMessage がある場合: 何も出力しないこと（エラー文言・案内文は一切表示しない）
 - スーパー・買い物カテゴリ（shop）の場合は、店舗リストの後に必ず追加:
   「📰 チラシ・特売情報:
   - [シュフーで探す](flyerUrl)

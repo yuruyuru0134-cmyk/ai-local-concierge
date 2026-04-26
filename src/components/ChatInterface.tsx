@@ -193,21 +193,6 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
       .join('')
   }
 
-  // ツール結果のerrorMessageを取得（AIがテキストを生成しなかった場合のフォールバック）
-  const getToolErrorMessage = (msg: (typeof messages)[number]): string | null => {
-    for (const part of msg.parts) {
-      if (!part.type.startsWith('tool-')) continue
-      const p = part as unknown as Record<string, unknown>
-      const state = p.state ?? (p.toolInvocation as Record<string, unknown> | undefined)?.state
-      const result = (p.result ?? (p.toolInvocation as Record<string, unknown> | undefined)?.result) as Record<string, unknown> | undefined
-      if (state === 'result' && result && typeof result.errorMessage === 'string') {
-        return result.errorMessage
-      }
-    }
-    return null
-  }
-
-
   // メッセージの画像パーツ取得
   const getMessageImages = (msg: (typeof messages)[number]): FileUIPart[] => {
     return msg.parts.filter(
@@ -323,8 +308,7 @@ export function ChatInterface({ mode, subOption, location, personality, onBack, 
         {messages.map((msg, msgIndex) => {
           const text = getMessageText(msg)
           const images = getMessageImages(msg)
-          const toolErrorMsg = msg.role === 'assistant' && !text ? getToolErrorMessage(msg) : null
-          const displayText = text || toolErrorMsg || ''
+          const displayText = text
           // 自動トリガーの最初のユーザーメッセージは非表示
           const isAutoTrigger = msgIndex === 0 && msg.role === 'user' && mode.id === 'useful'
           if (isAutoTrigger) return null
